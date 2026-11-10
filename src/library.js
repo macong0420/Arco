@@ -9,9 +9,12 @@ function requiredName(value, max = 100) { const name = core.text(value, max); if
 class Library {
   constructor(userData, notify) {
     this.file = path.join(userData, 'Library.json'); this.sessionFile = path.join(userData, 'Session.json'); this.historyFile = path.join(userData, 'History.json'); this.notify = notify;
+    const fresh = !fs.existsSync(this.file);
     const loaded = core.loadJSON(this.file, core.initialLibrary(), core.validateLibrary);
     this.data = loaded.data; this.warning = loaded.warning;
     this.settings = { ...core.initialLibrary().settings, ...this.data.settings };
+    // 只有全新安装才弹首次引导；已有数据的升级用户已经用过了，不再打扰。
+    if (typeof this.settings.onboarded !== 'boolean') this.settings.onboarded = fresh;
     if (!/^[\w-]{1,128}$/.test(this.settings.deviceID || '')) this.settings.deviceID = core.id();
     this.settings.sidebarWidth = Math.max(216, Math.min(400, Number(this.settings.sidebarWidth) || 240));
     this.data.settings = this.settings;

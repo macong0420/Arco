@@ -51,7 +51,7 @@ function secret(value, max = 4096) {
 function stamp(value) { return { ...value, updatedAt: value.updatedAt || now() }; }
 function initialLibrary() {
   const space = stamp({ id: 'personal', name: '个人', color: 'sky', customColor: '', bookmarks: [], folders: [] });
-  return { version: 1, spaces: [space], favorites: [], tombstones: {}, settings: { engine: 'google', sidebarWidth: 240, frameInset: true, trackerBlocking: true, theme: 'system', syncFolder: '', syncStatus: '', extensions: [] }, updatedAt: now() };
+  return { version: 1, spaces: [space], favorites: [], tombstones: {}, settings: { engine: 'google', sidebarWidth: 240, frameInset: true, trackerBlocking: true, theme: 'system', onboarded: false, syncFolder: '', syncStatus: '', extensions: [] }, updatedAt: now() };
 }
 function validRecord(record) {
   return record && typeof record.id === 'string' && !['__proto__','constructor','prototype'].includes(record.id) && /^[\w-]{1,128}$/.test(record.id) && typeof record.updatedAt === 'string' && Number.isFinite(Date.parse(record.updatedAt));

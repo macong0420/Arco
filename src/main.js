@@ -255,7 +255,7 @@ function setupSession(ses) {
     item.once('done', (_, state) => { if (!downloads.has(record.id)) return; record.state = state; record.path = item.getSavePath(); broadcast(); }); broadcast();
   });
 }
-const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'import-browser', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-delete', 'download-open', 'download-reveal', 'download-cancel', 'find', 'find-stop', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'copy', 'menu', 'confirm-clear']);
+const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'import-browser', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-delete', 'download-open', 'download-reveal', 'download-cancel', 'find', 'find-stop', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'copy', 'menu', 'confirm-clear']);
 function trustedWindow(event) {
   const win = [...windows].find(w => w.shell.webContents === event.sender);
   if (!win || event.senderFrame !== win.shell.webContents.mainFrame || event.senderFrame.url !== pathToFileURL(path.join(__dirname, 'shell.html')).href) error('未授权的界面请求');
@@ -323,13 +323,14 @@ ipcMain.handle('arco:invoke', async (event, message) => {
       case 'add-bookmark': library.addBookmark({ ...a, spaceID: a.spaceID || win.spaceID }); broadcast(); break;
       case 'update-bookmark': library.updateBookmark(a); broadcast(); break;
       case 'delete-bookmark': library.deleteBookmark(bounded(a.id, 128)); broadcast(); break;
-      case 'add-favorite': { const url=core.webURL(a.url), tab=[...win.tabs.values()].find(t=>t.url===url);library.addFavorite({...a,url,favicon:tab?.favicon || ''});broadcast();break; }
+      case 'add-favorite': { const url=core.webURL(a.url), tab=[...win.tabs.values()].find(t=>t.url===url);const item=library.addFavorite({...a,url,favicon:tab?.favicon || ''});broadcast();return item; }
       case 'add-folder': library.addFolder({ ...a, spaceID: a.spaceID || win.spaceID }); broadcast(); break;
       case 'update-folder': library.updateFolder(a); broadcast(); break;
       case 'delete-folder': library.deleteFolder(bounded(a.id, 128), !!a.removeContents); broadcast(); break;
       case 'import-bookmarks': { const file = a.path || await library.choose('file'); if (file) await library.importFile(file, win.spaceID); broadcast(); break; }
       case 'browser-sources': return browsers.detect();
       case 'import-browser': { const count = await library.importBrowser(bounded(a.id, 200), win.spaceID); broadcast(); return count; }
+      case 'finish-onboarding': library.settings.onboarded = true; library.change(); broadcast(); break;
       case 'export-bookmarks': return await library.exportFile(win.spaceID);
       case 'connect-sync': { const folder = testMode && a.path ? bounded(a.path) : await library.choose('directory'); if (folder) { passwordSync.lock(); library.settings.syncFolder = folder; library.change(); await library.syncNow(); reconcileSpaces(); broadcast(); } break; }
       case 'disconnect-sync': passwordSync.lock(); library.settings.syncFolder = ''; library.settings.syncStatus = ''; library.change(); broadcast(); break;

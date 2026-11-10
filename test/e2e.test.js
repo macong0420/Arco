@@ -18,6 +18,11 @@ async function launch() {
   }
   assert(shell,'Browser shell must be present'); shell.setDefaultTimeout(8000);
   await shell.waitForFunction(() => !!window.arco && !!document.querySelector('#space-name')?.textContent);
+  // 首次启动会弹欢迎引导；下面的用例从浏览器界面开始，先把引导关掉（关闭等于完成）。
+  if (await shell.waitForSelector('[data-onboarding]', { timeout: 4000 }).catch(() => null)) {
+    await shell.click('[data-action="onboard-skip"]');
+    await shell.waitForFunction(() => !document.querySelector('[data-onboarding]'));
+  }
 }
 async function close() {
   if (!app) return;
@@ -202,6 +207,54 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     await shell.getByRole('button',{name:'常驻测试',exact:true}).waitFor({state:'visible'});
     await shell.locator('[data-action="settings"]').click();await shell.locator('#settings-panel').waitFor();await inspect('capture',{name:'settings'});
   });
+});
+test('first launch walks the welcome onboarding and never shows it again',{timeout:60000},async()=>{
+  const folder=fs.mkdtempSync(path.join(os.tmpdir(),'arco-onboard-'));
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),'arco-onboard-home-'));
+  const chrome=path.join(home,'Library','Application Support','Google','Chrome');
+  fs.mkdirSync(path.join(chrome,'Default'),{recursive:true});
+  fs.writeFileSync(path.join(chrome,'Local State'),JSON.stringify({profile:{info_cache:{Default:{name:'默认'}},profiles_order:['Default']}}));
+  fs.writeFileSync(path.join(chrome,'Default','Bookmarks'),JSON.stringify({roots:{bookmark_bar:{type:'folder',name:'书签栏',children:[{type:'url',name:'Tour Page',url:'https://tour.test/'}]}}}));
+  const env={...process.env,ARCO_TEST_MODE:'1',ARCO_USER_DATA_DIR:folder,ARCO_BROWSER_HOME:home};
+  async function open(){
+    const instance=await electron.launch({args:[root],env,timeout:15000});let page=null;
+    for(let i=0;i<200&&!page;i++){page=(await instance.windows()).find(p=>/shell\.html$/.test(p.url()));if(!page)await new Promise(r=>setTimeout(r,50));}
+    page.setDefaultTimeout(8000);await page.waitForFunction(()=>!!window.arco&&!!document.querySelector('#favorites .favorite-add'));
+    return {instance,page,state:()=>page.evaluate(()=>window.arco.invoke('arco:test',{action:'state'}))};
+  }
+  let first,second;
+  try{
+    first=await open();const {page,state}=first;
+    await page.waitForSelector('[data-onboarding="hello"]');
+    assert.match(await page.textContent('[data-onboarding] h2'),/给自己一点空间/);
+    await page.click('[data-action="onboard-next"]');
+    await page.waitForSelector('[data-onboarding="bring"] #onboard-sources [data-import-browser]');
+    await page.click('#onboard-sources [data-import-browser]');
+    await assertEventually(async()=>(await state()).allBookmarks.some(x=>x.url==='https://tour.test/'));
+    await page.click('[data-action="onboard-next"]');
+    await page.waitForSelector('[data-onboarding="sites"] .onboard-site');
+    await page.click('[data-onboard-site="https://github.com"]');
+    await assertEventually(async()=>(await state()).favorites.some(x=>x.url==='https://github.com/'));
+    await page.click('[data-action="onboard-next"]');
+    await page.waitForSelector('[data-onboard-toggle="trackerBlocking"]');
+    await page.click('[data-onboard-toggle="trackerBlocking"]');
+    await assertEventually(async()=>(await state()).settings.trackerBlocking===false);
+    await page.click('[data-action="onboard-next"]');
+    await page.waitForSelector('#onboard-theme');
+    await page.selectOption('#onboard-theme','dark');
+    await assertEventually(async()=>(await state()).settings.theme==='dark');
+    await page.click('[data-action="onboard-next"]');
+    await page.waitForFunction(()=>!document.querySelector('[data-onboarding]'));
+    await assertEventually(async()=>(await state()).settings.onboarded===true);
+    await first.instance.close().catch(()=>{});first=null;
+    second=await open();
+    await new Promise(r=>setTimeout(r,500));
+    assert.equal(await second.page.$('[data-onboarding]'),null,'onboarding must not come back on the second launch');
+    assert((await second.state()).settings.theme==='dark');
+  } finally {
+    await first?.instance.close().catch(()=>{});await second?.instance.close().catch(()=>{});
+    fs.rmSync(folder,{recursive:true,force:true});fs.rmSync(home,{recursive:true,force:true});
+  }
 });
 test('failed protected loads do not let shutdown replace Session bytes',{timeout:30000},async()=>{
   async function boot(folder,failFile){
