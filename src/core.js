@@ -289,4 +289,90 @@ function parseArcSidebar(root) {
   result.favorites=[...top].flatMap(key=>(items.get(key)?.childrenIds || []).flatMap(child=>pages(child))).map(x=>({...x,folders:[]}));
   return result;
 }
-module.exports = { ENGINES, webURL, navigate, exactOrigin, originAllowed, id, now, text, secret, stamp, initialLibrary, validateLibrary, mergeLibraries, atomicWrite, loadJSON, reorder, deleteRecords, parseChromiumBookmarks, parseNetscape, netscape, parseCSV, parseArcSidebar };
+const PLIST_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+// Safari 的 Bookmarks.plist 是二进制 plist 且含 <data> 块，plutil 无法转成 JSON，只能转成 XML 后自己读。
+function parsePlistXML(xml) {
+  if (typeof xml !== 'string' || xml.length > 64 * 1024 * 1024) throw new Error('plist 文件过大或无效');
+  const decode = value => value.replace(/&(#x[\da-f]+|#\d+|\w+);/gi, (all, key) => {
+    if (key[0] !== '#') return PLIST_ENTITIES[key.toLowerCase()] ?? all;
+    const hex = key[1] === 'x' || key[1] === 'X';
+    return String.fromCodePoint(parseInt(key.slice(hex ? 2 : 1), hex ? 16 : 10) || 32);
+  });
+  const source = xml.replace(/<data>[\s\S]*?<\/data>/gi, '<data/>'), stack = [];
+  let root = null, match;
+  const put = value => {
+    const top = stack[stack.length - 1];
+    if (!top) { root = value; return; }
+    if (Array.isArray(top.value)) top.value.push(value);
+    else { top.value[top.key] = value; top.key = ''; }
+  };
+  const value = item => item.name === 'dict' || item.name === 'array' ? item.value : item.name === 'integer' || item.name === 'real' ? Number(item.value) || 0 : item.name === 'data' ? null : item.value;
+  const tag = /<([\w:-]+)\s*(\/)?>|<\/([\w:-]+)\s*>|([^<]+)/g;
+  while ((match = tag.exec(source))) {
+    const [, open, selfClose, close, text] = match;
+    if (close) {
+      const item = stack.pop();
+      if (!item || item.name === 'plist') continue;
+      if (item.name === 'key') { const top = stack[stack.length - 1]; if (top && !Array.isArray(top.value)) top.key = item.value; continue; }
+      put(value(item));
+    } else if (open) {
+      if (open === 'true' || open === 'false') put(open === 'true');
+      else if (['dict', 'array', 'key', 'string', 'integer', 'real', 'date', 'data'].includes(open)) {
+        if (selfClose) put(open === 'dict' ? {} : open === 'array' ? [] : open === 'data' ? null : '');
+        else stack.push({ name: open, value: open === 'dict' ? {} : open === 'array' ? [] : '', key: '' });
+      }
+    } else if (text !== undefined) {
+      const top = stack[stack.length - 1];
+      if (top && top.name !== 'plist' && top.name !== 'dict' && !Array.isArray(top.value)) top.value += decode(text);
+    }
+  }
+  if (root === null) throw new Error('plist 内容为空');
+  return root;
+}
+function folderName(value) { return String(value || '文件夹').slice(0, 100); }
+// Safari 顶层容器（BookmarksBar、BookmarksMenu）不是用户的文件夹，从第二层开始才算。
+function parseSafariBookmarks(value) {
+  const root = typeof value === 'string' ? parsePlistXML(value) : value;
+  if (!root || typeof root !== 'object' || !Array.isArray(root.Children)) throw new Error('不是 Safari 书签文件');
+  const result = [];
+  function walk(node, folders, depth) {
+    if (!node || typeof node !== 'object') return;
+    if (node.WebBookmarkType === 'WebBookmarkTypeLeaf' && typeof node.URLString === 'string') {
+      try { result.push({ id: id(), title: text(node.URIDictionary?.title || node.Title || node.URLString, 500), url: webURL(node.URLString), folders, updatedAt: now() }); } catch {}
+    }
+    if (!Array.isArray(node.Children)) return;
+    for (const child of node.Children) {
+      if (child?.Title === 'com.apple.ReadingList') continue;
+      const folder = child?.WebBookmarkType === 'WebBookmarkTypeList';
+      walk(child, folder && depth >= 1 ? [...folders, folderName(child.Title)] : folders, depth + 1);
+    }
+  }
+  walk(root, [], 0);
+  return result;
+}
+// Firefox 的 moz_bookmarks 树：id 1-6 是浏览器自带的根（含标签），6 以下只保留用户文件夹。
+function parseFirefoxTree(rows) {
+  if (!Array.isArray(rows) || rows.length > 100000) throw new Error('书签数据无效');
+  const byID = new Map(rows.map(row => [Number(row.id), row]));
+  function pathOf(parent) {
+    const folders = [], seen = new Set();
+    let current = Number(parent);
+    while (current > 6 && !seen.has(current) && folders.length < 64) {
+      seen.add(current);
+      const node = byID.get(current);
+      if (!node) break;
+      folders.unshift(folderName(node.title));
+      current = Number(node.parent);
+    }
+    return current === 6 ? null : folders;
+  }
+  const result = [];
+  for (const row of rows) {
+    if (Number(row.type) !== 1 || typeof row.url !== 'string') continue;
+    const folders = pathOf(row.parent);
+    if (!folders) continue;
+    try { result.push({ id: id(), title: text(row.title || row.url, 500), url: webURL(row.url), folders, updatedAt: now() }); } catch {}
+  }
+  return result;
+}
+module.exports = { ENGINES, webURL, navigate, exactOrigin, originAllowed, id, now, text, secret, stamp, initialLibrary, validateLibrary, mergeLibraries, atomicWrite, loadJSON, reorder, deleteRecords, parseChromiumBookmarks, parseNetscape, netscape, parseCSV, parseArcSidebar, parsePlistXML, parseSafariBookmarks, parseFirefoxTree };

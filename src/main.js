@@ -5,6 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const core = require('./core');
 const Library = require('./library');
+const browsers = require('./browsers');
 const { EncryptedVault, MemoryVault } = require('./vault');
 const { PasswordSync, mergeCredentials } = require('./password-sync');
 const { pathToFileURL } = require('node:url');
@@ -100,6 +101,8 @@ function createWindow(isPrivate = false) {
   win.shell = new WebContentsView({ webPreferences: { preload: path.join(__dirname, 'shell-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } });
   win.contentView.addChildView(win.shell); win.shell.setBackgroundColor('#00000000');
   win.shell.webContents.loadFile(path.join(__dirname, 'shell.html'));
+  // 界面脚本加载完成前发出的状态会丢失，首次渲染会停在空白侧栏，所以加载后再推一次。
+  win.shell.webContents.once('did-finish-load', () => sendState(win));
   win.shell.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.shell.webContents.on('will-navigate', event => event.preventDefault());
   win.on('resize', () => layout(win)); win.on('closed', () => { for (const tab of win.tabs.values()) if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close(); win.peek?.webContents.close(); if (!win.shell.webContents.isDestroyed()) win.shell.webContents.close(); for (const [id, d] of downloads) if (d.private && d.windowID === win.id) downloads.delete(id); windows.delete(win); });
@@ -252,7 +255,7 @@ function setupSession(ses) {
     item.once('done', (_, state) => { if (!downloads.has(record.id)) return; record.state = state; record.path = item.getSavePath(); broadcast(); }); broadcast();
   });
 }
-const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-delete', 'download-open', 'download-reveal', 'download-cancel', 'find', 'find-stop', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'copy', 'menu', 'confirm-clear']);
+const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'import-browser', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-delete', 'download-open', 'download-reveal', 'download-cancel', 'find', 'find-stop', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'copy', 'menu', 'confirm-clear']);
 function trustedWindow(event) {
   const win = [...windows].find(w => w.shell.webContents === event.sender);
   if (!win || event.senderFrame !== win.shell.webContents.mainFrame || event.senderFrame.url !== pathToFileURL(path.join(__dirname, 'shell.html')).href) error('未授权的界面请求');
@@ -325,6 +328,8 @@ ipcMain.handle('arco:invoke', async (event, message) => {
       case 'update-folder': library.updateFolder(a); broadcast(); break;
       case 'delete-folder': library.deleteFolder(bounded(a.id, 128), !!a.removeContents); broadcast(); break;
       case 'import-bookmarks': { const file = a.path || await library.choose('file'); if (file) await library.importFile(file, win.spaceID); broadcast(); break; }
+      case 'browser-sources': return browsers.detect();
+      case 'import-browser': { const count = await library.importBrowser(bounded(a.id, 200), win.spaceID); broadcast(); return count; }
       case 'export-bookmarks': return await library.exportFile(win.spaceID);
       case 'connect-sync': { const folder = testMode && a.path ? bounded(a.path) : await library.choose('directory'); if (folder) { passwordSync.lock(); library.settings.syncFolder = folder; library.change(); await library.syncNow(); reconcileSpaces(); broadcast(); } break; }
       case 'disconnect-sync': passwordSync.lock(); library.settings.syncFolder = ''; library.settings.syncStatus = ''; library.change(); broadcast(); break;

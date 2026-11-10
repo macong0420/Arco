@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { dialog, shell, app, session, safeStorage } = require('electron');
 const core = require('./core');
+const browsers = require('./browsers');
 function requiredName(value, max = 100) { const name = core.text(value, max); if (!name) throw new Error('名称不能为空'); return name; }
 
 class Library {
@@ -160,6 +161,11 @@ class Library {
       return this.commit(data => { this.appendBookmarks(data, spaces.favorites || [], spaceID, true); return this.appendSpaces(data, spaces); });
     }
     return this.importBookmarks(core.parseChromiumBookmarks(json), spaceID);
+  }
+  async importBrowser(id, spaceID) {
+    const entry = browsers.resolve(String(id || ''));
+    if (entry.kind === 'arc') return this.importFile(entry.file, spaceID);
+    return this.importBookmarks(entry.items, spaceID);
   }
   async exportFile(spaceID) {
     const result = await dialog.showSaveDialog({ defaultPath: 'Arco-Bookmarks.html', filters: [{ name: 'HTML 书签', extensions: ['html'] }] });

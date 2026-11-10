@@ -16,7 +16,7 @@ npm start
 ```
 
 ```sh
-npm test           # URL、存储、导入、书签合并、密码加密同步
+npm test           # URL、存储、导入、浏览器书签读取、书签合并、密码加密同步
 npm run test:e2e   # 真实 Electron 应用，使用临时配置和本地测试网站
 npm run pack      # 编译系统认证辅助程序、生成独立图标、打包并本地签名
 open dist/mac-arm64/Arco.app
@@ -32,7 +32,7 @@ open dist/mac-arm64/Arco.app
 - Chromium 网页、地址/搜索命令栏、前进/后退/刷新、标签关闭/恢复、静音、标签排序和移到空间；固定书签的打开、编辑、排序、移动和删除。
 - 真实双网页分屏、分屏比例调整、Shift 点击链接 Peek、全部标签页视图、页内查找、历史、下载进度和文件操作。
 - 密码保存确认、精确来源的显式填充、强密码生成、CSV 导入/导出；显示、复制和填充通过系统认证解锁。
-- 书签 HTML、Chromium Bookmarks JSON、Arc StorableSidebar JSON 导入；HTML 导出保留空间与文件夹路径。
+- 书签导入：直接读取本机 Chrome、Edge、Brave、Vivaldi、Opera、Dia、Firefox、Safari、Arc 的书签文件（Chrome 开启账号书签同步时读 `AccountBookmarks`；Safari 与 Chromium 系数据需授予完全磁盘访问权限），也可导入 HTML、Chromium Bookmarks JSON、Arc StorableSidebar JSON 文件；HTML 导出保留空间与文件夹路径。
 - 阅读视图（Mozilla Readability）、打印、保存 PDF、网页可视区域截图、Chromium 自带 PDF 查看和开发者工具。
 - 每个无痕窗口使用独立内存会话；不写浏览历史、标签会话或密码，也不复用后来新开的无痕窗口的 Cookie。
 - 通过 Electron 支持的 API 加载本地解压扩展。
@@ -79,7 +79,7 @@ open dist/mac-arm64/Arco.app
 
 ## 当前验收状态
 
-已通过 21 项基础与同步测试、13 项端到端检查，包括认证等待期间切换标签、无痕窗口隔离、关闭后恢复标签、损坏文件保护和同一进程重新打开窗口时的恢复失败保护。打包应用的真实网页、书签、命令栏和认证辅助程序也有独立检查。
+已通过 27 项基础、同步与浏览器书签导入测试、13 项端到端检查，包括认证等待期间切换标签、无痕窗口隔离、关闭后恢复标签、损坏文件保护和同一进程重新打开窗口时的恢复失败保护。打包应用的真实网页、书签、命令栏和认证辅助程序也有独立检查。
 
 这是开发预览版，最终独立安全复审尚未完成。本机加密密码库及重启读取已有验证；重新签名后的钥匙串访问需要使用者本人授权，Touch ID 的实际批准流程和两台 Mac 之间的 iCloud 文件传输仍需人工验收。
 
@@ -94,7 +94,7 @@ open dist/mac-arm64/Arco.app
 | 扩展 | 支持部分解压扩展；不支持 Chrome Web Store 一键安装、通用 1Password 桌面原生桥接或完整 Chrome 扩展 API |
 | 拦截规则 | 仅内置 16 个常见跟踪服务域名后缀，非主文档请求；不是原版约 13 万条 EasyList 内容规则 |
 | Arc 导入 | 读取经典容器及 sidebarSyncState/firebaseSyncState 中的空间、固定页、文件夹、收藏和颜色；不导入登录 Cookie 或 SQLite 历史 |
-| 其他浏览器导入 | 使用 HTML/Chromium JSON/密码 CSV 文件；没有直接读取各浏览器受保护配置的迁移流程 |
+| 其他浏览器导入 | 直接读取 Chrome、Edge、Brave、Vivaldi、Opera、Dia、Firefox、Safari、Arc 的书签文件，导入到当前空间（Safari 需完全磁盘访问权限，否则在 Safari 中导出书签文件）；不迁移密码、历史、Cookie、登录状态和扩展 |
 | Passkeys、翻译、画中画、网页通知深度集成 | 没有保证与原版对等，需分别补充实现和站点验证 |
 | DRM、Google 登录和 Chrome Sync | 不附带 Google 私有服务、Chrome 账号同步或 Widevine 授权；网站兼容性需实测 |
 | 截图、标签休眠、固定分屏 | 当前截图为可视区域；尚无全页截图、标签休眠或固定分屏恢复 |
