@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; font-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Arco</title>
+  <link rel="stylesheet" href="shell.css">
+</head>
+<body>
+  <svg class="icons" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+    <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M9 5v14M5 8h1m-1 3h1m-1 3h1"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="m14.5 5.5-6.5 6.5 6.5 6.5"/></symbol>
+    <symbol id="i-forward" viewBox="0 0 24 24"><path d="m9.5 5.5 6.5 6.5-6.5 6.5"/></symbol>
+    <symbol id="i-reload" viewBox="0 0 24 24"><path d="M19.5 9a8 8 0 1 0 .1 6M19.5 4v5h-5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><ellipse cx="12" cy="12" rx="3.5" ry="8.5"/><path d="M4 10h16M4 14h16"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5.5" y="10" width="13" height="10" rx="2.5"/><path d="M8.5 10V7.5a3.5 3.5 0 0 1 7 0V10M12 14v2"/></symbol>
+    <symbol id="i-warning" viewBox="0 0 24 24"><path d="M12 3.5 21 20H3L12 3.5ZM12 9v5m0 3v.1"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7.5v11a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-7l-2-3h-4a2 2 0 0 0-2 2v1.5Z"/></symbol>
+    <symbol id="i-bookmark" viewBox="0 0 24 24"><path d="M6.5 4.5h11v16L12 16l-5.5 4.5v-16Z"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18.5h11a4 4 0 0 0 .4-8A6.5 6.5 0 0 0 6 8.5a5 5 0 0 0 1 10Z"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="m9.5 4-.6 2.1-2 .9-2-.4L3 9l1.6 1.6v2.8L3 15l1.9 2.4 2-.4 2 .9.6 2.1h5l.6-2.1 2-.9 2 .4L21 15l-1.6-1.6v-2.8L21 9l-1.9-2.4-2 .4-2-.9-.6-2.1h-5Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3.5v12m-4-4 4 4 4-4M4 16v4h16v-4"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M4 9a8 8 0 1 1-.2 5M4 4v5h5M12 7v5l3 2"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4.5"/><path d="m11 12 9-9m-4 4 3 3m-6 0 3 3"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></symbol>
+    <symbol id="i-tabs" viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="13" rx="2"/><path d="M7 4h13v12M8 11h8m-8 4h5"/></symbol>
+    <symbol id="i-split" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M12 4.5v15"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+    <symbol id="i-reader" viewBox="0 0 24 24"><path d="M4 5.5c3-1 5-1 8 1v13c-3-2-5-2-8-1v-13Zm16 0c-3-1-5-1-8 1v13c3-2 5-2 8-1v-13Z"/></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 10h4l5-4v12l-5-4H4v-4Zm12-1 5 6m0-6-5 6"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="m4 16 12-12 4 4L8 20l-5 1 1-5Zm10-10 4 4M4 12V4h8"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 4h6l1 3H8l1-3Zm-3 3 1 13h10l1-13M10 11v5m4-5v5"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r=".8"/><circle cx="12" cy="12" r=".8"/><circle cx="19" cy="12" r=".8"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1 6.2-5.5-3-5.5 3 1-6.2L3 9.6l6.2-.9L12 3Z"/></symbol>
+    <symbol id="i-private" viewBox="0 0 24 24"><path d="M3 11c5-5 13-5 18 0-5 6-13 6-18 0Zm8-7h2m-4 2h6M9 15l6-6"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 7h4l2-3h4l2 3h4v13H4V7Z"/><circle cx="12" cy="13" r="4"/></symbol>
+    <symbol id="i-print" viewBox="0 0 24 24"><path d="M7 9V3h10v6M7 17H4V9h16v8h-3M7 14h10v7H7v-7Z"/></symbol>
+  </defs></svg>
+  <aside id="sidebar" aria-label="浏览器侧栏">
+    <div class="topbar drag-region"><div class="traffic-space"></div>
+      <button class="icon" data-action="toggle-sidebar" aria-label="隐藏侧栏" title="隐藏侧栏"><svg><use href="#i-sidebar"/></svg></button>
+      <div class="navigation"><button class="icon" data-action="back" aria-label="后退" title="后退"><svg><use href="#i-back"/></svg></button><button class="icon" data-action="forward" aria-label="前进" title="前进"><svg><use href="#i-forward"/></svg></button><button class="icon" data-action="reload" aria-label="重新加载" title="重新加载"><svg><use href="#i-reload"/></svg></button></div>
+    </div>
+    <button id="domain-button" class="domain-field" data-action="palette" title="搜索或输入地址"><span id="security-icon"><svg><use href="#i-globe"/></svg></span><span id="domain">搜索或输入地址</span><svg class="domain-bookmark"><use href="#i-bookmark"/></svg></button>
+    <div id="favorites" class="favorites" role="group" aria-label="常驻网站"></div>
+    <div id="sidebar-scroll">
+      <button type="button" id="space-heading" class="space-heading" title="编辑空间"><span class="space-dot" aria-hidden="true"></span><span id="space-name">个人</span><svg class="quiet"><use href="#i-chevron"/></svg></button>
+      <div id="pinned"></div>
+      <div class="section-label"><span>标签页</span><button data-action="clear-tabs" class="text-button">清理</button></div>
+      <button class="sidebar-row new-tab-button" data-action="new-tab"><svg><use href="#i-plus"/></svg><span>新建标签页</span></button>
+      <div id="tabs"></div>
+    </div>
+    <div id="bottom-bar"><button class="icon" data-action="downloads" aria-label="下载" title="下载"><svg><use href="#i-download"/></svg><span id="download-dot"></span></button><div id="space-switcher"></div><button class="icon" data-action="settings" title="设置" aria-label="设置"><svg><use href="#i-settings"/></svg></button><button class="icon" data-action="add-space" title="新建空间" aria-label="新建空间"><svg><use href="#i-plus"/></svg></button></div>
+    <div id="sidebar-resizer" role="separator" aria-label="调整侧栏宽度"></div>
+  </aside>
+  <main id="main">
+    <div id="new-tab" class="new-tab">
+      <div class="brand-mark"><span class="arc-symbol"></span><span>Arco</span></div>
+      <h1>给自己一点空间。</h1>
+      <button class="new-tab-search" data-action="palette"><svg><use href="#i-search"/></svg><span>搜索或输入地址</span><kbd>⌘ L</kbd></button>
+      <div class="shortcut-row"><button data-action="overview"><svg><use href="#i-tabs"/></svg>查看全部标签页</button><button data-action="history"><svg><use href="#i-history"/></svg>浏览历史</button><button data-action="passwords"><svg><use href="#i-key"/></svg>密码</button></div>
+      <p class="new-tab-note">你的书签、空间与密码，留在你手中。</p>
+    </div>
+    <div id="page-toolbar" class="page-toolbar drag-region" role="toolbar" aria-label="页面工具栏">
+      <div class="toolbar-leading">
+        <button id="toolbar-sidebar-toggle" class="icon" aria-controls="sidebar" aria-expanded="false" data-action="toggle-sidebar" aria-label="显示侧栏" title="显示侧栏" hidden><svg><use href="#i-sidebar"/></svg></button>
+        <div id="collapsed-navigation" class="toolbar-group" hidden><button class="icon" data-action="back" aria-label="后退" title="后退"><svg><use href="#i-back"/></svg></button><button class="icon" data-action="forward" aria-label="前进" title="前进"><svg><use href="#i-forward"/></svg></button><button class="icon" data-action="reload" aria-label="重新加载" title="重新加载"><svg><use href="#i-reload"/></svg></button></div>
+        <div id="toolbar-utility" class="toolbar-group"><button class="icon" data-action="menu" title="浏览器菜单" aria-label="浏览器菜单"><svg><use href="#i-menu"/></svg></button><button class="icon" data-action="overview" title="全部标签页" aria-label="全部标签页"><svg><use href="#i-tabs"/></svg></button><button class="icon" data-action="toggle-split" title="分屏" aria-label="分屏"><svg><use href="#i-split"/></svg></button></div>
+      </div>
+      <span class="toolbar-spacer"></span><button id="toolbar-address" class="toolbar-location" data-action="palette" aria-label="编辑当前地址" hidden><span id="toolbar-domain"></span></button><span class="toolbar-spacer"></span>
+      <div class="toolbar-trailing"><button class="icon" data-action="add-current-bookmark" title="固定为书签" aria-label="固定为书签"><svg><use href="#i-star"/></svg></button><button class="icon" data-action="reader" title="阅读视图" aria-label="阅读视图"><svg><use href="#i-reader"/></svg></button><button class="icon" data-action="passwords" title="密码" aria-label="密码"><svg><use href="#i-key"/></svg></button><button class="icon" data-action="find" title="页内查找" aria-label="页内查找"><svg><use href="#i-search"/></svg></button><button id="collapsed-menu" class="icon" data-action="menu" title="浏览器菜单" aria-label="浏览器菜单" hidden><svg><use href="#i-menu"/></svg></button></div>
+    </div>
+    <div id="second-toolbar" class="page-toolbar"><strong id="second-title"></strong><span class="toolbar-spacer"></span><button class="icon" data-action="close-split" title="关闭分屏"><svg><use href="#i-close"/></svg></button></div>
+    <div id="split-resizer" role="separator" aria-label="调整分屏大小"></div>
+    <div id="peek-toolbar" class="floating peek-toolbar"><strong>快速预览</strong><span id="peek-title"></span><button data-action="peek-to-tab">打开为标签页</button><button class="icon" data-action="close-peek" aria-label="关闭预览"><svg><use href="#i-close"/></svg></button></div>
+  </main>
+  <div id="page-snapshots" aria-hidden="true"></div>
+  <div id="overlay-root" hidden></div>
+  <div id="toast" role="status" hidden></div>
+  <script src="renderer.js"></script>
+</body>
+</html>

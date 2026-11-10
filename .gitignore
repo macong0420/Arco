@@ -1,0 +1,25 @@
+node_modules/
+dist/
+build/
+native/ArcoVault
+.DS_Store
+artifacts/*.json
+
+# Local configuration and browser data must stay on this computer.
+.env
+.env.*
+!.env.example
+*.log
+.pi/
+tasks/
+Library.json
+Session.json
+History.json
+Vault.json
+Arco-Library/
+Arco-Password-Devices/
+Arco-Passwords.json
+
+# Required source scripts override a global *.sh ignore rule.
+!scripts/build-native.sh
+!scripts/sign-local.sh

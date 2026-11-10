@@ -1,0 +1,19 @@
+Arco
+Copyright 2026 Arco contributors
+
+Arco is an independent Chromium browser reimplementation inspired by and referencing
+Zigzag (https://github.com/macong0420/zigzag), snapshot
+bf1423a2755ab8c539577e4bb53b45a89e808090.
+
+Zigzag
+Copyright 2026 Zigao Wang
+The upstream source is licensed under the Apache License, Version 2.0.
+Arco's implementation changes the engine, UI implementation, storage and sync behavior.
+See LICENSE for Apache-2.0 terms and README.md for functional differences.
+
+The Zigzag name, logo and application icon are trademarks of Zigao Wang and are not
+covered by that code license. Arco uses its own name, icon and visual mark and is not
+endorsed by or affiliated with Zigzag, Arc, or The Browser Company.
+
+Mozilla Readability: Apache License 2.0, resources/Readability-LICENSE.md.
+Electron and Chromium runtime licenses are distributed with the packaged runtime.
