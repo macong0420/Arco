@@ -49,6 +49,8 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     res.setHeader('Content-Type','text/html; charset=utf-8');
     if(req.url.startsWith('/welcome'))return res.end('<title>Welcome</title><h1>Signed in</h1>');
     if(req.url.startsWith('/second'))return res.end('<title>Second Fixture</title><h1>Second page</h1>');
+    if(req.url.startsWith('/oauth-provider'))return res.end('<title>OAuth Provider</title><script>try{window.opener.postMessage("code=e2e","*")}catch(e){document.title="no-opener"}setTimeout(()=>window.close(),80)</script>');
+    if(req.url.startsWith('/oauth-start'))return res.end('<title>OAuth Start</title><button id="go">第三方登录</button><div id="result">waiting</div><script>document.getElementById("go").onclick=()=>window.open("/oauth-provider","auth","width=420,height=520");window.addEventListener("message",e=>{document.getElementById("result").textContent="got:"+e.data})</script>');
     res.end(fixture);
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve)); origin='http://127.0.0.1:'+server.address().port;
@@ -205,6 +207,15 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     assert.equal(state.allBookmarks.filter(x=>x.title==='持久化书签').length,1);
     assert(state.favorites.some(item=>item.title==='常驻测试'&&item.favicon===origin+'/ui-icon.svg'));
     await shell.getByRole('button',{name:'常驻测试',exact:true}).waitFor({state:'visible'});
+    // 三方登录弹窗：window.open 必须是真的弹窗窗口，window.opener 才能收到 postMessage
+    await invoke('new-tab',{url:origin+'/oauth-start'});
+    const login=await remote(origin+'/oauth-start');
+    const popupEvent=app.waitForEvent('window',{timeout:8000}).catch(()=>null);
+    await login.click('#go');
+    const popup=await popupEvent;
+    assert(popup,'window.open must open a real popup window');
+    assert.match(popup.url(),/\/oauth-provider/);
+    await assertEventually(async()=>(await login.evaluate(()=>document.querySelector('#result').textContent))==='got:code=e2e');
     await shell.locator('[data-action="settings"]').click();await shell.locator('#settings-panel').waitFor();await inspect('capture',{name:'settings'});
   });
 });
@@ -254,6 +265,70 @@ test('first launch walks the welcome onboarding and never shows it again',{timeo
   } finally {
     await first?.instance.close().catch(()=>{});await second?.instance.close().catch(()=>{});
     fs.rmSync(folder,{recursive:true,force:true});fs.rmSync(home,{recursive:true,force:true});
+  }
+});
+test('a Chrome Web Store package installs through the settings UI',{timeout:60000},async t=>{
+  const folder=fs.mkdtempSync(path.join(os.tmpdir(),'arco-store-'));
+  const build=fs.mkdtempSync(path.join(os.tmpdir(),'arco-store-build-'));
+  fs.mkdirSync(path.join(build,'ext'),{recursive:true});
+  fs.writeFileSync(path.join(build,'ext','manifest.json'),JSON.stringify({manifest_version:3,name:'Arco Store Fixture',version:'1.0.0',description:'fixture',icons:{'128':'icon.png'},action:{default_title:'Fixture'},background:{service_worker:'sw.js'},content_scripts:[{matches:['<all_urls>'],js:['cs.js']}]}));
+  fs.writeFileSync(path.join(build,'ext','sw.js'),"chrome.action.onClicked.addListener(() => { chrome.windows.create({ url: chrome.runtime.getURL('tool.html'), type: 'popup', width: 420, height: 320 }); });");
+  fs.writeFileSync(path.join(build,'ext','tool.html'),'<!doctype html><title>Fixture Tool</title><h1 id="tool">fixture tool</h1>');
+  fs.writeFileSync(path.join(build,'ext','icon.png'),Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==','base64'));
+  fs.writeFileSync(path.join(build,'ext','cs.js'),'document.documentElement.dataset.arcoStore="1";');
+  const { execFileSync } = require('node:child_process');
+  execFileSync('/usr/bin/zip',['-q','-r',path.join(build,'pack.zip'),'.'],{cwd:path.join(build,'ext')});
+  const head=Buffer.alloc(12);head.write('Cr24',0,'binary');head.writeUInt32LE(3,4);head.writeUInt32LE(4,8);
+  const payload=Buffer.concat([head,Buffer.from('sig!'),fs.readFileSync(path.join(build,'pack.zip'))]);
+  const store=http.createServer((request,response)=>{
+    if(request.url.startsWith('/page')){ response.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}); return response.end('<title>Fixture</title><h1>Fixture</h1>'); }
+    response.writeHead(200,{'Content-Type':'application/x-chrome-extension'}); response.end(payload);
+  });
+  await new Promise(resolve=>store.listen(0,'127.0.0.1',resolve));
+  const pageOrigin=`http://127.0.0.1:${store.address().port}`;
+  let instance=null;
+  try{
+    instance=await electron.launch({args:[root],env:{...process.env,ARCO_TEST_MODE:'1',ARCO_USER_DATA_DIR:folder,ARCO_CRX_ORIGIN:`http://127.0.0.1:${store.address().port}`},timeout:15000});
+    let page=null;
+    for(let i=0;i<200&&!page;i++){page=(await instance.windows()).find(p=>/shell\.html$/.test(p.url()));if(!page)await new Promise(r=>setTimeout(r,50));}
+    page.setDefaultTimeout(8000);await page.waitForFunction(()=>!!window.arco&&!!document.querySelector('#favorites .favorite-add'));
+    if(await page.$('[data-onboarding]')){await page.click('[data-action="onboard-skip"]');await page.waitForFunction(()=>!document.querySelector('[data-onboarding]'));}
+    await page.click('[data-action="settings"]');await page.click('[data-settings-section="extensions"]');
+    await page.fill('#store-input','https://chromewebstore.google.com/detail/fixture/eimadpbcbfnmbkopoojfekhnkhdbieeh?hl=zh-CN');
+    await page.click('[data-action="install-store-input"]');
+    await page.waitForFunction(()=>/Arco Store Fixture/.test(document.querySelector('#extension-list')?.textContent||''));
+    const state=await page.evaluate(()=>window.arco.invoke('arco:test',{action:'state'}));
+    assert.equal(state.settings.extensions.length,1);
+    assert.equal(state.settings.extensions[0].storeID,'eimadpbcbfnmbkopoojfekhnkhdbieeh');
+    assert(fs.existsSync(path.join(folder,'Extensions','eimadpbcbfnmbkopoojfekhnkhdbieeh','cs.js')));
+    await page.fill('#store-input','https://example.com/detail/x/eimadpbcbfnmbkopoojfekhnkhdbieeh');
+    await page.click('[data-action="install-store-input"]');
+    await page.waitForFunction(()=>/只支持 Chrome 应用商店/.test(document.querySelector('#toast')?.textContent||''));
+    // 工具栏的扩展入口（空白标签页不显示工具栏，先打开一个网页）：图标栏 + 启用/停用
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(()=>document.querySelector('#overlay-root')?.hidden);
+    await page.evaluate(o=>window.arco.invoke('arco:invoke',{channel:'new-tab',payload:{url:o}}),pageOrigin+'/page');
+    await page.waitForSelector('.address-row [data-extensions-entry]:not([hidden])');
+    await page.click('.address-row [data-extensions-entry]');
+    await page.waitForFunction(()=>/Arco Store Fixture/.test(document.querySelector('#extensions-body')?.textContent||''));
+    // 图标栏由兼容库的 <browser-action-list> 渲染，不再是手写磁贴
+    await page.waitForSelector('browser-action-list');
+    await page.click('[data-extension-toggle]');
+    await page.waitForFunction(()=>/已停用/.test(document.querySelector('#extensions-body')?.textContent||''));
+    assert.equal((await page.evaluate(()=>window.arco.invoke('arco:test',{action:'state'}))).settings.extensions[0].enabled,false);
+    await page.click('[data-extension-toggle]');
+    await page.waitForFunction(()=>/已启用/.test(document.querySelector('#extensions-body')?.textContent||''));
+    // 核心链路：点扩展自己的图标 → 它的 chrome.action.onClicked → 它自己的 chrome.windows.create
+    await page.waitForFunction(()=>{const list=document.querySelector('browser-action-list');return !!(list&&list.shadowRoot&&list.shadowRoot.querySelector('button'));});
+    await page.evaluate(()=>{const list=document.querySelector('browser-action-list');list.shadowRoot.querySelector('button').click();});
+    let tool=null;
+    await assertEventually(async()=>{tool=(await instance.windows()).find(w=>/\/tool\.html$/.test(w.url()));return !!tool;});
+    await tool.waitForSelector('#tool');
+    assert.equal(await tool.textContent('#tool'),'fixture tool');
+  } finally {
+    await instance?.close().catch(()=>{});
+    await new Promise(resolve=>store.close(resolve));
+    fs.rmSync(folder,{recursive:true,force:true});fs.rmSync(build,{recursive:true,force:true});
   }
 });
 test('failed protected loads do not let shutdown replace Session bytes',{timeout:30000},async()=>{

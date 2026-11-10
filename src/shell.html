@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; font-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http: crx:; font-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Arco</title>
   <link rel="stylesheet" href="shell.css">
@@ -27,6 +27,7 @@
     <symbol id="i-history" viewBox="0 0 24 24"><path d="M4 9a8 8 0 1 1-.2 5M4 4v5h5M12 7v5l3 2"/></symbol>
     <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4.5"/><path d="m11 12 9-9m-4 4 3 3m-6 0 3 3"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></symbol>
+    <symbol id="i-puzzle" viewBox="0 0 24 24"><path d="M9.5 4.2a2.3 2.3 0 0 1 4.6 0v1.3h2.7a1.5 1.5 0 0 1 1.5 1.5v2.7h-1.2a2.3 2.3 0 0 0 0 4.6h1.2V17a1.5 1.5 0 0 1-1.5 1.5h-2.7v-1.3a2.3 2.3 0 0 0-4.6 0v1.3H6.5A1.5 1.5 0 0 1 5 17v-2.7h1.3a2.3 2.3 0 0 0 0-4.6H5V7a1.5 1.5 0 0 1 1.5-1.5h3V4.2Z"/></symbol>
     <symbol id="i-tabs" viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="13" rx="2"/><path d="M7 4h13v12M8 11h8m-8 4h5"/></symbol>
     <symbol id="i-split" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M12 4.5v15"/></symbol>
     <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
@@ -45,7 +46,7 @@
       <button class="icon" data-action="toggle-sidebar" aria-label="隐藏侧栏" title="隐藏侧栏"><svg><use href="#i-sidebar"/></svg></button>
       <div class="navigation"><button class="icon" data-action="back" aria-label="后退" title="后退"><svg><use href="#i-back"/></svg></button><button class="icon" data-action="forward" aria-label="前进" title="前进"><svg><use href="#i-forward"/></svg></button><button class="icon" data-action="reload" aria-label="重新加载" title="重新加载"><svg><use href="#i-reload"/></svg></button></div>
     </div>
-    <button id="domain-button" class="domain-field" data-action="palette" title="搜索或输入地址"><span id="security-icon"><svg><use href="#i-globe"/></svg></span><span id="domain">搜索或输入地址</span><svg class="domain-bookmark"><use href="#i-bookmark"/></svg></button>
+    <div class="address-row"><button id="domain-button" class="domain-field" data-action="palette" title="搜索或输入地址"><span id="security-icon"><svg><use href="#i-globe"/></svg></span><span id="domain">搜索或输入地址</span><svg class="domain-bookmark"><use href="#i-bookmark"/></svg></button><button class="icon extensions-entry" data-extensions-entry data-action="extensions" title="扩展" aria-label="扩展" hidden><svg><use href="#i-puzzle"/></svg></button></div>
     <div id="favorites" class="favorites" role="group" aria-label="常驻网站"></div>
     <div id="sidebar-scroll">
       <button type="button" id="space-heading" class="space-heading" title="编辑空间"><span class="space-dot" aria-hidden="true"></span><span id="space-name">个人</span><svg class="quiet"><use href="#i-chevron"/></svg></button>
@@ -72,7 +73,7 @@
         <div id="toolbar-utility" class="toolbar-group"><button class="icon" data-action="menu" title="浏览器菜单" aria-label="浏览器菜单"><svg><use href="#i-menu"/></svg></button><button class="icon" data-action="overview" title="全部标签页" aria-label="全部标签页"><svg><use href="#i-tabs"/></svg></button><button class="icon" data-action="toggle-split" title="分屏" aria-label="分屏"><svg><use href="#i-split"/></svg></button></div>
       </div>
       <span class="toolbar-spacer"></span><button id="toolbar-address" class="toolbar-location" data-action="palette" aria-label="编辑当前地址" hidden><span id="toolbar-domain"></span></button><span class="toolbar-spacer"></span>
-      <div class="toolbar-trailing"><button class="icon" data-action="add-current-bookmark" title="固定为书签" aria-label="固定为书签"><svg><use href="#i-star"/></svg></button><button class="icon" data-action="reader" title="阅读视图" aria-label="阅读视图"><svg><use href="#i-reader"/></svg></button><button class="icon" data-action="passwords" title="密码" aria-label="密码"><svg><use href="#i-key"/></svg></button><button class="icon" data-action="find" title="页内查找" aria-label="页内查找"><svg><use href="#i-search"/></svg></button><button id="collapsed-menu" class="icon" data-action="menu" title="浏览器菜单" aria-label="浏览器菜单" hidden><svg><use href="#i-menu"/></svg></button></div>
+      <div class="toolbar-trailing"><button class="icon" data-extensions-entry data-action="extensions" title="扩展" aria-label="扩展" hidden><svg><use href="#i-puzzle"/></svg></button><button id="store-install" class="toolbar-install" data-action="install-store" title="用 Arco 安装此扩展" hidden>安装扩展</button><button class="icon" data-action="add-current-bookmark" title="固定为书签" aria-label="固定为书签"><svg><use href="#i-star"/></svg></button><button class="icon" data-action="reader" title="阅读视图" aria-label="阅读视图"><svg><use href="#i-reader"/></svg></button><button class="icon" data-action="passwords" title="密码" aria-label="密码"><svg><use href="#i-key"/></svg></button><button class="icon" data-action="find" title="页内查找" aria-label="页内查找"><svg><use href="#i-search"/></svg></button><button id="collapsed-menu" class="icon" data-action="menu" title="浏览器菜单" aria-label="浏览器菜单" hidden><svg><use href="#i-menu"/></svg></button></div>
     </div>
     <div id="second-toolbar" class="page-toolbar"><strong id="second-title"></strong><span class="toolbar-spacer"></span><button class="icon" data-action="close-split" title="关闭分屏"><svg><use href="#i-close"/></svg></button></div>
     <div id="split-resizer" role="separator" aria-label="调整分屏大小"></div>

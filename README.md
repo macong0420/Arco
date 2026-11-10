@@ -31,12 +31,12 @@ open dist/mac-arm64/Arco.app
 - Arc 风格彩色窗口、默认 240px 可调整侧栏、30px 标签行、默认三列的常驻网站网格（直接添加或拖入标签、跨空间共享）、嵌套书签文件夹、Spaces、浅色/深色外观及自定义空间颜色。
 - 首次启动欢迎引导（复刻 Zigzag）：欢迎页 → 从浏览器导入书签 → 选常用网站做常驻磁贴 → 拦截器开关 → 外观与快捷键，完成或关闭即不再打扰；设置 → 关于可重新查看。
 - Chromium 网页、地址/搜索命令栏、前进/后退/刷新、标签关闭/恢复、静音、标签排序和移到空间；固定书签的打开、编辑、排序、移动和删除。
-- 真实双网页分屏、分屏比例调整、Shift 点击链接 Peek、全部标签页视图、页内查找、历史、下载进度和文件操作。
+- 真实双网页分屏、分屏比例调整、Shift 点击链接 Peek、全部标签页视图、页内查找、历史、下载进度和文件操作；`window.open` 弹窗使用真正的子窗口（保留 `window.opener`），第三方登录、支付回跳的 postMessage 可正常收发。
 - 密码保存确认、精确来源的显式填充、强密码生成、CSV 导入/导出；显示、复制和填充通过系统认证解锁。
 - 书签导入：直接读取本机 Chrome、Edge、Brave、Vivaldi、Opera、Dia、Firefox、Safari、Arc 的书签文件（Chrome 开启账号书签同步时读 `AccountBookmarks`；Safari 与 Chromium 系数据需授予完全磁盘访问权限），也可导入 HTML、Chromium Bookmarks JSON、Arc StorableSidebar JSON 文件；HTML 导出保留空间与文件夹路径。
 - 阅读视图（Mozilla Readability）、打印、保存 PDF、网页可视区域截图、Chromium 自带 PDF 查看和开发者工具。
 - 每个无痕窗口使用独立内存会话；不写浏览历史、标签会话或密码，也不复用后来新开的无痕窗口的 Cookie。
-- 通过 Electron 支持的 API 加载本地解压扩展。
+- 扩展：从 Chrome 应用商店按链接或扩展 ID 安装（走 Google 官方更新接口下载 crx、本机解包后加载），商店页面顶部会注入 Arco 自己的安装栏，地址栏右侧也有安装按钮；工具栏的扩展入口显示图标、版本与启用状态，可停用、启用或移除（停用只卸载，文件仍在）；通过 [electron-chrome-extensions](https://github.com/samuelmaddock/electron-browser-shell) 补齐 Electron 缺失的扩展 API：工具栏图标列表、`chrome.action`/`onClicked`、`chrome.tabs`、`chrome.windows`、`chrome.contextMenus`、`chrome.notifications` 等。点图标即按扩展自己的逻辑执行——声明了 `default_popup` 的弹出它自己的界面，没声明的触发它的 `onClicked`（例如 JSON-handle 会自己 `chrome.windows.create` 开窗口）。仍可加载本地解压扩展。
 
 常驻区始终显示“＋ 添加”，可填写名称和网址，也可把标签或固定书签拖到常驻区。常驻磁贴使用实际网站图标，点按会优先切换到当前空间里已打开的同一网页。悬停或键盘聚焦磁贴后，可以使用移除按钮。
 
@@ -80,7 +80,7 @@ open dist/mac-arm64/Arco.app
 
 ## 当前验收状态
 
-已通过 28 项基础、同步与浏览器书签导入测试、14 项端到端检查，包括首启引导走完五步且重启后不再弹出、认证等待期间切换标签、无痕窗口隔离、关闭后恢复标签、损坏文件保护和同一进程重新打开窗口时的恢复失败保护。打包应用的真实网页、书签、命令栏和认证辅助程序也有独立检查。
+已通过 33 项基础、同步、浏览器书签与扩展包测试、15 项端到端检查，包括首启引导走完五步且重启后不再弹出、从商店链接安装扩展并拒绝非商店链接、点扩展图标触发它自己的 `onClicked` 并由扩展自己开窗口、认证等待期间切换标签、无痕窗口隔离、关闭后恢复标签、损坏文件保护和同一进程重新打开窗口时的恢复失败保护。打包应用的真实网页、书签、命令栏和认证辅助程序也有独立检查。
 
 这是开发预览版，最终独立安全复审尚未完成。本机加密密码库及重启读取已有验证；重新签名后的钥匙串访问需要使用者本人授权，Touch ID 的实际批准流程和两台 Mac 之间的 iCloud 文件传输仍需人工验收。
 
@@ -92,7 +92,7 @@ open dist/mac-arm64/Arco.app
 | 浏览内核 | Chromium；体积、内存和更新责任与原版 WebKit 不同 |
 | 书签同步 | 新增加密之外的明文书签文件夹同步；原版没有书签/Spaces 跨设备同步 |
 | 密码同步 | 加密文件夹同步；当前本地构建没有原生 iCloud Keychain 同步权限 |
-| 扩展 | 支持部分解压扩展；不支持 Chrome Web Store 一键安装、通用 1Password 桌面原生桥接或完整 Chrome 扩展 API |
+| 扩展 | 可从商店按链接/ID 安装（商店自带的“添加至 Chrome”按钮在 Electron 中无效，改用注入的安装栏或地址栏安装按钮），安装前显示扩展请求的权限；通过兼容层支持工具栏图标、`chrome.action`、`chrome.tabs`、`chrome.windows`、右键菜单等；不校验 crx 签名；`chrome.runtime.connectNative`/`sendNativeMessage` 被拒绝（不启动本机原生应用）；`chrome.permissions.request` 一律拒绝；无 Chrome 账号同步、无扩展自动更新、无通用 1Password 桌面原生桥接 |
 | 拦截规则 | 仅内置 16 个常见跟踪服务域名后缀，非主文档请求；不是原版约 13 万条 EasyList 内容规则 |
 | Arc 导入 | 读取经典容器及 sidebarSyncState/firebaseSyncState 中的空间、固定页、文件夹、收藏和颜色；不导入登录 Cookie 或 SQLite 历史 |
 | 其他浏览器导入 | 直接读取 Chrome、Edge、Brave、Vivaldi、Opera、Dia、Firefox、Safari、Arc 的书签文件，导入到当前空间（Safari 需完全磁盘访问权限，否则在 Safari 中导出书签文件）；不迁移密码、历史、Cookie、登录状态和扩展 |

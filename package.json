@@ -42,5 +42,8 @@
       }
     },
     "directories": { "output": "dist" }
+  },
+  "dependencies": {
+    "electron-chrome-extensions": "4.10.0"
   }
 }

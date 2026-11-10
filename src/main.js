@@ -1,11 +1,12 @@
 'use strict';
-const { app, BaseWindow, WebContentsView, session, ipcMain, dialog, shell, clipboard, Menu, nativeTheme, nativeImage } = require('electron');
+const { app, BaseWindow, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, clipboard, Menu, nativeTheme, nativeImage } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const core = require('./core');
 const Library = require('./library');
 const browsers = require('./browsers');
+const { createExtensionHost } = require('./extension-host');
 const { EncryptedVault, MemoryVault } = require('./vault');
 const { PasswordSync, mergeCredentials } = require('./password-sync');
 const { pathToFileURL } = require('node:url');
@@ -21,7 +22,7 @@ app.setPath('userData', userData);
 app.setName('Arco');
 app.enableSandbox();
 const windows = new Set();
-let library, vault, passwordSync;
+let library, vault, passwordSync, extensionHost;
 const normalSession = 'persist:arco';
 const downloads = new Map();
 const closedTabs = [];
@@ -35,7 +36,7 @@ function bounded(value, maximum = 8192) { if (typeof value !== 'string' || value
 function isHTTP(value) { try { return ['http:', 'https:'].includes(new URL(value).protocol); } catch { return false; } }
 function sendState(win) { if (!win || win.isDestroyed() || win.shell.webContents.isDestroyed()) return; layout(win); win.shell.webContents.send('arco:state', serialize(win)); }
 function broadcast() { for (const win of windows) sendState(win); }
-function publicTab(tab) { const wc = tab.view.webContents; return { id: tab.id, spaceID: tab.spaceID, url: tab.url, title: tab.title, favicon: tab.favicon, loading: !wc.isDestroyed() && wc.isLoading(), canBack: !wc.isDestroyed() && wc.navigationHistory.canGoBack(), canForward: !wc.isDestroyed() && wc.navigationHistory.canGoForward(), muted: !wc.isDestroyed() && wc.isAudioMuted(), playing: !wc.isDestroyed() && wc.isCurrentlyAudible(), pinned: tab.pinned, zoom: !wc.isDestroyed() ? wc.getZoomFactor() : 1 }; }
+function publicTab(tab) { const wc = tab.view.webContents; return { id: tab.id, webContentsID: wc.isDestroyed() ? -1 : wc.id, spaceID: tab.spaceID, url: tab.url, title: tab.title, favicon: tab.favicon, loading: !wc.isDestroyed() && wc.isLoading(), canBack: !wc.isDestroyed() && wc.navigationHistory.canGoBack(), canForward: !wc.isDestroyed() && wc.navigationHistory.canGoForward(), muted: !wc.isDestroyed() && wc.isAudioMuted(), playing: !wc.isDestroyed() && wc.isCurrentlyAudible(), pinned: tab.pinned, store: storeID(tab.url), zoom: !wc.isDestroyed() ? wc.getZoomFactor() : 1 }; }
 function serialize(win) {
   return {
     private: win.private, chromium: process.versions.chrome, tabs: [...win.tabs.values()].map(publicTab), activeID: win.activeID, splitID: win.splitID, splitRatio: win.splitRatio,
@@ -58,7 +59,7 @@ function saveSession() {
   if (!library || !sessionReady) return;
   const normalWindows = [...windows].filter(w => !w.private && !w.isDestroyed());
   const normal = normalWindows.find(w => w.isFocused()) || normalWindows[0];
-  const tabs = normal ? normalWindows.flatMap(w => [...w.tabs.values()]).map(t => ({ id: t.id, spaceID: t.spaceID, url: t.url, title: t.title, pinned: t.pinned })) : library.savedSession?.tabs || [];
+  const tabs = normal ? normalWindows.flatMap(w => [...w.tabs.values()]).filter(t => !t.url || isHTTP(t.url)).map(t => ({ id: t.id, spaceID: t.spaceID, url: t.url, title: t.title, pinned: t.pinned })) : library.savedSession?.tabs || [];
   const data = { version: 1, tabs, activeSpaceID: normal?.spaceID || library.savedSession?.activeSpaceID, activeID: normal?.activeID || library.savedSession?.activeID, closed: closedTabs.slice(-30), activeBySpace: normal ? Object.fromEntries(normal.lastActive) : library.savedSession?.activeBySpace || {} };
   core.atomicWrite(library.sessionFile, data); library.savedSession = data;
 }
@@ -98,7 +99,7 @@ function createWindow(isPrivate = false) {
     for (const closed of loaded.data.closed || []) if (closed?.url && !closedTabs.some(x => x.url === closed.url)) closedTabs.push(closed);
     sessionReady = true;
   }
-  win.shell = new WebContentsView({ webPreferences: { preload: path.join(__dirname, 'shell-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } });
+  win.shell = new WebContentsView({ webPreferences: { preload: extensionHost.shellPreload, contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } });
   win.contentView.addChildView(win.shell); win.shell.setBackgroundColor('#00000000');
   win.shell.webContents.loadFile(path.join(__dirname, 'shell.html'));
   // 界面脚本加载完成前发出的状态会丢失，首次渲染会停在空白侧栏，所以加载后再推一次。
@@ -118,34 +119,52 @@ function createWindow(isPrivate = false) {
 }
 function createTab(win, rawURL, options = {}) {
   if (!win || win.isDestroyed() || (!win.private && !library.space(options.spaceID || win.spaceID))) error('空间不存在');
-  const url = rawURL ? core.webURL(rawURL) : '';
+  const url = rawURL && rawURL !== 'about:blank' ? (options.extensionPage ? extensionHost.url(rawURL) : core.webURL(rawURL)) : '';
   const id = options.id || core.id(), spaceID = win.private ? win.spaceID : options.spaceID || win.spaceID;
   const view = new WebContentsView({ webPreferences: { partition: win.partition, preload: path.join(__dirname, 'page-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, safeDialogs: true } });
   const tab = { id, spaceID, url, title: options.title || (url ? new URL(url).hostname : '新标签页'), favicon: '', pinned: !!options.pinned, view, window: win };
   win.tabs.set(id, tab); attachTab(tab);
+  if (!win.private) extensionHost.track(view.webContents, win);
   if (url) view.webContents.loadURL(url).catch(() => {});
-  if (options.select !== false) selectTab(win, id); else { addPageView(win, tab, false); sendState(win); }
+  if (options.select !== false) selectTab(win, id); else { addPageView(win, tab, false); if (!win.private && win.tabs.has(win.activeID)) extensionHost.select(win.tabs.get(win.activeID).view.webContents); sendState(win); }
   if (!win.private) saveSession(); return tab;
+}
+// window.open(url, name, 'width=..,height=..') 这类弹窗必须保留 window.opener，否则三方登录/支付的 postMessage 回传就断了。
+function popupSize(features) {
+  const size = key => { const match = String(features || '').match(new RegExp(`${key}=(\\d+)`)); return match ? Number(match[1]) : 0; };
+  return { width: Math.max(320, Math.min(1200, size('width') || 520)), height: Math.max(240, Math.min(1000, size('height') || 640)) };
 }
 function attachTab(tab) {
   const wc = tab.view.webContents, win = tab.window;
   wc.setWindowOpenHandler(details => {
-    if (isHTTP(details.url)) {
-      if (details.disposition === 'new-window' && details.referrer?.url) createTab(win, details.url, { select: true });
-      else createTab(win, details.url, { select: details.disposition !== 'background-tab' });
-    } else { try { if (ALLOWED_EXTERNAL.has(new URL(details.url).protocol)) confirmExternal(win, details.url); } catch {} }
+    if (!isHTTP(details.url)) { try { if (ALLOWED_EXTERNAL.has(new URL(details.url).protocol)) confirmExternal(win, details.url); } catch {} return { action: 'deny' }; }
+    if (details.disposition === 'new-window' && /popup|width=|height=/.test(details.features || '')) {
+      return { action: 'allow', overrideBrowserWindowOptions: { ...popupSize(details.features), titleBarStyle: 'default', autoHideMenuBar: true, minimizable: false, maximizable: false, fullscreenable: false, webPreferences: { session: session.fromPartition(win.partition), contextIsolation: true, nodeIntegration: false, sandbox: true } } };
+    }
+    createTab(win, details.url, { select: details.disposition !== 'background-tab' });
     return { action: 'deny' };
   });
+  wc.on('did-create-window', child => { child.setMenu(null); });
   const guardNavigation = (event, url) => {
     if (!isHTTP(url)) { event.preventDefault(); try { if (ALLOWED_EXTERNAL.has(new URL(url).protocol)) confirmExternal(win, url); } catch {} }
   };
   wc.on('will-navigate', guardNavigation); wc.on('will-redirect', guardNavigation);
+  // 商店安装栏的哨兵地址：只有当前页面确实是同一个扩展的商店详情页时才接受。
+  // 注意读 wc.getURL()：did-start-navigation 已经把 tab.url 改成了哨兵地址。
+  wc.on('will-navigate', (event, url) => {
+    if (!url.startsWith(STORE_INSTALL)) return;
+    event.preventDefault();
+    const current = wc.getURL(); tab.url = current; sendState(win);
+    const id = storeID(current);
+    if (!id || url !== STORE_INSTALL + id) return;
+    installFromStore(win, id).catch(cause => console.error('安装扩展失败:', cause.message));
+  });
   wc.on('did-start-navigation', (event, url, isInPlace, isMainFrame) => { if (isMainFrame && !isInPlace) { tab.url = url; tab.window.reader = false; sendState(win); } });
   wc.on('did-navigate', (_, url) => { tab.url = url; sendState(win); saveSession(); });
-  wc.on('did-navigate-in-page', (_, url, isMainFrame) => { if (isMainFrame) { tab.url = url; recordHistory(tab); sendState(win); saveSession(); } });
+  wc.on('did-navigate-in-page', (_, url, isMainFrame) => { if (isMainFrame) { tab.url = url; recordHistory(tab); offerStoreInstall(tab); sendState(win); saveSession(); } });
   wc.on('page-title-updated', (event, title) => { event.preventDefault(); tab.title = title.slice(0, 1000) || '新标签页'; sendState(win); });
   wc.on('page-favicon-updated', (_, icons) => { tab.favicon = icons[0] || ''; sendState(win); });
-  wc.on('did-finish-load', () => { tab.url = wc.getURL(); recordHistory(tab); sendState(win); });
+  wc.on('did-finish-load', () => { tab.url = wc.getURL(); recordHistory(tab); offerStoreInstall(tab); sendState(win); });
   wc.on('did-start-loading', () => sendState(win)); wc.on('did-stop-loading', () => sendState(win));
   wc.on('audio-state-changed', () => sendState(win));
   wc.on('ipc-message', (event, channel, payload) => {
@@ -158,7 +177,7 @@ function attachTab(tab) {
     win.capture = { tabID: tab.id, origin, username: payload.username, password: payload.password }; sendState(win);
   });
   wc.on('context-menu', (_, params) => {
-    const template = [];
+    const template = extensionHost.contextMenu(wc, params) || [];
     if (params.linkURL && isHTTP(params.linkURL)) template.push({ label: '在新标签页打开链接', click: () => createTab(win, params.linkURL, { select: true }) }, { label: '在 Peek 中预览', click: () => openPeek(win, params.linkURL) });
     if (params.srcURL && isHTTP(params.srcURL)) template.push({ label: '下载图像', click: () => wc.downloadURL(params.srcURL) });
     template.push({ label: '后退', enabled: wc.navigationHistory.canGoBack(), click: () => wc.navigationHistory.goBack() }, { label: '重新加载', click: () => wc.reload() }, { type: 'separator' }, { label: params.isEditable ? '粘贴' : '复制', role: params.isEditable ? 'paste' : 'copy', enabled: params.isEditable || !!params.selectionText }, { label: '检查元素', click: () => wc.inspectElement(params.x, params.y) });
@@ -176,13 +195,112 @@ function attachTab(tab) {
     }
   });
 }
+function extensionBrowser(windowID) {
+  const ordinary = [...windows].filter(win => !win.private && !win.isDestroyed());
+  return ordinary.find(win => win.id === windowID) || ordinary.find(win => win.isFocused()) || ordinary[0] || createWindow(false);
+}
+function createExtensionTab(details) {
+  const extensionID = details.__arcoExtensionID || '';
+  const url = extensionHost.url(details.url || 'about:blank', extensionID);
+  const win = extensionBrowser(details.windowId);
+  const tab = createTab(win, url, { extensionPage: true, extensionID, select: details.active !== false });
+  return [tab.view.webContents, win];
+}
+function attachExtensionWindow(child, extensionID) {
+  const wc = child.webContents, ses = session.fromPartition(normalSession);
+  extensionHost.track(wc, child); extensionHost.ownWindow(child, extensionID);
+  const guard = (event, url) => { try { extensionHost.url(url, extensionID); } catch { event.preventDefault(); } };
+  wc.on('will-navigate', guard); wc.on('will-redirect', guard);
+  wc.setWindowOpenHandler(details => {
+    try { extensionHost.url(details.url, extensionID); } catch { return { action: 'deny' }; }
+    return { action: 'allow', overrideBrowserWindowOptions: { ...popupSize(details.features), webPreferences: { session: ses, contextIsolation: true, nodeIntegration: false, sandbox: true } } };
+  });
+  wc.on('did-create-window', nested => attachExtensionWindow(nested, extensionID));
+}
+function createExtensionWindow(details) {
+  const extensionID = details.__arcoExtensionID || '';
+  const urls = [].concat(details.url || 'about:blank');
+  if (urls.length > 20) error('一次打开的扩展页面过多');
+  for (let i = 0; i < urls.length; i++) urls[i] = extensionHost.url(urls[i], extensionID);
+  if (details.type !== 'popup') {
+    const win = createWindow(false), blank = win.activeID;
+    for (const url of urls) createTab(win, url, { extensionPage: true, extensionID });
+    if (urls.length && blank) closeTab(win, blank);
+    return win;
+  }
+  if (urls.length !== 1) error('扩展弹窗只能打开一个页面');
+  const owner = extensionBrowser(details.windowId);
+  const extension = session.fromPartition(normalSession).extensions.getExtension(extensionID);
+  const child = new BrowserWindow({ show: false, width: Math.max(320, Math.min(1440, Number(details.width) || 760)), height: Math.max(240, Math.min(1000, Number(details.height) || 640)), x: details.left, y: details.top, parent: owner, title: extension?.name || '扩展', autoHideMenuBar: true, webPreferences: { session: session.fromPartition(normalSession), sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, safeDialogs: true } });
+  attachExtensionWindow(child, extensionID);
+  child.webContents.once('did-finish-load', () => { if (!child.isDestroyed()) child.show(); });
+  child.loadURL(urls[0]).catch(cause => { console.error('扩展页面加载失败:', cause.message); if (!child.isDestroyed()) child.close(); });
+  return child;
+}
+async function openExtensionPopup(win, id, anchor = {}) {
+  if (win.private) error('无痕窗口不能打开扩展');
+  if (!(library.settings.extensions || []).some(record => record.id === id)) error('扩展不存在');
+  const rect = Object.fromEntries(['x', 'y', 'width', 'height'].map(key => [key, Math.max(0, Math.min(10000, Number(anchor[key]) || 0))]));
+  const scale = win.shell.webContents.getZoomFactor();
+  rect.x = Math.round((win.sidebarVisible ? library.settings.sidebarWidth : 0) + rect.x / scale); rect.y = Math.round(rect.y / scale);
+  await extensionHost.click(win, id, rect);
+  return { opened: true };
+}
+function storeID(raw) {
+  try {
+    const url = new URL(raw);
+    if (!/(^|\.)chromewebstore\.google\.com$/.test(url.hostname) || !url.pathname.startsWith('/detail/')) return '';
+    const id = url.pathname.split('/').filter(Boolean).pop() || '';
+    return /^[a-p]{32}$/.test(id) ? id : '';
+  } catch { return ''; }
+}
+// 商店页面的“添加至 Chrome”在 Electron 里无效，所以注入一条 Arco 自己的安装栏，点它通过哨兵地址回到主进程。
+const STORE_INSTALL = 'https://arco-install.invalid/';
+function storeBannerScript(id) {
+  return `(() => {
+    document.getElementById('arco-store-install')?.remove();
+    const host = document.createElement('div');
+    host.id = 'arco-store-install';
+    host.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;gap:12px;padding:9px 14px;background:#292b32;color:#fff;font:13px -apple-system,"PingFang SC",sans-serif;box-shadow:0 2px 14px rgba(0,0,0,.28)';
+    const text = document.createElement('span');
+    text.textContent = '商店里的“添加至 Chrome”在 Arco 里不生效，用这里安装：';
+    const install = document.createElement('button');
+    install.textContent = '安装此扩展';
+    install.style.cssText = 'border:0;border-radius:13px;padding:5px 14px;background:#fff;color:#292b32;font:inherit;cursor:pointer';
+    install.addEventListener('click', () => { location.href = ${JSON.stringify(STORE_INSTALL)} + ${JSON.stringify(id)}; });
+    const close = document.createElement('button');
+    close.textContent = '×';
+    close.setAttribute('aria-label', '关闭');
+    close.style.cssText = 'border:0;background:none;color:#fff;font:16px -apple-system,sans-serif;cursor:pointer;opacity:.7';
+    close.addEventListener('click', () => host.remove());
+    host.append(text, install, close);
+    document.documentElement.appendChild(host);
+  })()`;
+}
+function offerStoreInstall(tab) {
+  const id = storeID(tab.url);
+  if (!id || tab.view.webContents.isDestroyed()) return;
+  tab.view.webContents.executeJavaScript(storeBannerScript(id), true).catch(() => {});
+}
+async function installFromStore(win, input) {
+  if (win.private) error('无痕窗口不能安装扩展');
+  const result = await library.installFromStore(input, testMode ? async () => true : async asked => {
+    const detail = [`权限：${asked.permissions.join('、') || '无'}`, asked.optional.length ? `可选权限：${asked.optional.join('、')}` : '', 'Arco 不校验扩展签名。'].filter(Boolean).join('\n');
+    const answer = await dialog.showMessageBox(win, { type: 'question', buttons: ['取消', '安装'], defaultId: 0, cancelId: 0, message: `安装 ${asked.name} ${asked.version}？`, detail: detail.slice(0, 2000) });
+    return answer.response === 1;
+  });
+  if (result.cancelled) return { cancelled: true, list: await library.extensionList() };
+  broadcast();
+  if (!win.shell.webContents.isDestroyed()) win.shell.webContents.send('arco:command', 'store-installed');
+  return result;
+}
 function safeCaptureOrigin(value) { try { const url = new URL(core.webURL(value)); if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return null; return url.origin; } catch { return null; } }
 function selectTab(win, tabID) {
   const tab = win.tabs.get(tabID); if (!tab) error('标签页不存在');
   closePeek(win); win.reader = false;
   for (const other of win.tabs.values()) removePageView(win, other);
   win.activeID = tabID; win.spaceID = tab.spaceID; win.lastActive.set(tab.spaceID,tabID); win.splitID = null;
-  addPageView(win, tab, true); layout(win); sendState(win); saveSession();
+  addPageView(win, tab, true); if (!win.private) extensionHost.select(tab.view.webContents); layout(win); sendState(win); saveSession();
   if (!win.overlay) (tab.url ? tab.view.webContents : win.shell.webContents).focus();
 }
 function switchSpace(win, spaceID) {
@@ -198,7 +316,7 @@ function switchSpace(win, spaceID) {
 function closeTab(win, tabID) {
   const tab = win.tabs.get(tabID); if (!tab) return;
   const wasActive = win.activeID === tabID; removePageView(win, tab); tab.view.webContents.close(); win.tabs.delete(tabID);
-  if (!win.private) closedTabs.push({ url: tab.url, title: tab.title, spaceID: tab.spaceID, closedAt: core.now() });
+  if (!win.private && isHTTP(tab.url)) closedTabs.push({ url: tab.url, title: tab.title, spaceID: tab.spaceID, closedAt: core.now() });
   if (win.splitID === tabID) win.splitID = null;
   if (wasActive) { win.activeID = null; const next = [...win.tabs.values()].find(t => t.spaceID === win.spaceID); if (next) selectTab(win, next.id); else createTab(win, '', { select: true }); }
   sendState(win); saveSession();
@@ -255,7 +373,7 @@ function setupSession(ses) {
     item.once('done', (_, state) => { if (!downloads.has(record.id)) return; record.state = state; record.path = item.getSavePath(); broadcast(); }); broadcast();
   });
 }
-const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'import-browser', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-delete', 'download-open', 'download-reveal', 'download-cancel', 'find', 'find-stop', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'copy', 'menu', 'confirm-clear']);
+const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'import-browser', 'install-extension-store', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-delete', 'download-open', 'download-reveal', 'download-cancel', 'find', 'find-stop', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'extension-list', 'extension-toggle', 'extension-popup', 'copy', 'menu', 'confirm-clear']);
 function trustedWindow(event) {
   const win = [...windows].find(w => w.shell.webContents === event.sender);
   if (!win || event.senderFrame !== win.shell.webContents.mainFrame || event.senderFrame.url !== pathToFileURL(path.join(__dirname, 'shell.html')).href) error('未授权的界面请求');
@@ -368,8 +486,12 @@ ipcMain.handle('arco:invoke', async (event, message) => {
       case 'generate-password': return require('node:crypto').randomBytes(24).toString('base64url') + '-A9!';
       case 'import-passwords': { const file = await library.choose('file'); if (!file) return 0; const rows = core.parseCSV(fs.readFileSync(file, 'utf8')); for (const row of rows) await vault.save(row); return rows.length; }
       case 'export-passwords': { if (win.private) error('无痕窗口不能导出密码'); const accepted = await dialog.showMessageBox(win, {type:'warning', buttons:['取消','导出明文'],defaultId:0,cancelId:0,message:'导出的 CSV 包含未加密密码。确定继续？'}); if (accepted.response !== 1) return false; await vault.authenticate(); const result = await dialog.showSaveDialog(win, { defaultPath: 'Arco-Passwords.csv', filters: [{ name: '明文 CSV（请妥善保管）', extensions: ['csv'] }] }); if (!result.filePath) return false; const credentials = await vault.list(), lines = ['name,url,username,password']; for (const item of credentials) { const full = await vault.read(item.id); const escape = value => '"' + String(value).replaceAll('"', '""') + '"'; lines.push([full.title, full.origin, full.username, full.password].map(escape).join(',')); } fs.writeFileSync(result.filePath, '\ufeff' + lines.join('\n'), { mode: 0o600 }); return true; }
-      case 'add-extension': return await library.addExtension();
-      case 'remove-extension': await library.removeExtension(bounded(a.id, 128)); break;
+      case 'add-extension': if (win.private) error('无痕窗口不能安装扩展'); return await library.addExtension();
+      case 'extension-list': if (win.private) error('无痕窗口不能管理扩展'); return await library.extensionList();
+      case 'extension-toggle': if (win.private) error('无痕窗口不能管理扩展'); return await library.setExtensionEnabled(bounded(a.id, 200), !!a.enabled);
+      case 'extension-popup': return await openExtensionPopup(win, bounded(a.id, 200), a.anchor || {});
+      case 'install-extension-store': { const result = await installFromStore(win, bounded(a.input, 500)); return { ...result, list: await library.extensionList() }; }
+      case 'remove-extension': if (win.private) error('无痕窗口不能管理扩展'); await library.removeExtension(bounded(a.id, 128)); break;
       case 'copy': clipboard.writeText(bounded(a.text, 1000000)); break;
       case 'menu': showAppMenu(win); break;
       case 'confirm-clear': return dialog.showMessageBoxSync(win, { type: 'warning', buttons: ['取消', '继续'], defaultId: 0, cancelId: 0, message: bounded(a.message, 1000) }) === 1;
@@ -396,7 +518,9 @@ async function readerArticle(win) {
   return article;
 }
 function showAppMenu(win) {
+  const active = win.tabs.get(win.activeID), store = win.private ? '' : storeID(active?.url);
   Menu.buildFromTemplate([
+    ...(store ? [{ label: '安装此扩展', click: () => installFromStore(win, store).catch(cause => console.error('安装扩展失败:', cause.message)) }, { type: 'separator' }] : []),
     { label: '新标签页', accelerator: 'CmdOrCtrl+T', click: () => createTab(win, '', { select: true }) },
     { label: '关闭标签页', accelerator: 'CmdOrCtrl+W', click: () => closeTab(win, win.activeID) },
     { label: '恢复关闭的标签页', accelerator: 'Shift+CmdOrCtrl+T', click: () => reopenTab(win) },
@@ -426,7 +550,7 @@ function allowedDownload(win, id) {
   return value;
 }
 function installMenu() {
-  const focused = () => BaseWindow.getFocusedWindow() || [...windows][0];
+  const focused = () => { const win = BaseWindow.getFocusedWindow(); return windows.has(win) ? win : [...windows].find(w => !w.private) || [...windows][0]; };
   const send = command => { const win = focused(); if (win) win.shell.webContents.send('arco:command', command); };
   const run = action => () => { const win = focused(); if (win) action(win); };
   Menu.setApplicationMenu(Menu.buildFromTemplate([
@@ -484,10 +608,27 @@ app.whenReady().then(async () => {
   library = new Library(userData, broadcast); vault = testMode ? new MemoryVault() : new EncryptedVault(userData);
   passwordSync = new PasswordSync(() => library.settings.syncFolder, library.settings.deviceID);
   setupSession(session.fromPartition(normalSession));
+  extensionHost = createExtensionHost({
+    userData, ses: session.fromPartition(normalSession),
+    isShell(event) { try { return !trustedWindow(event).private; } catch { return false; } },
+    createTab: createExtensionTab,
+    createWindow: createExtensionWindow,
+    selectTab(wc, owner) {
+      if (windows.has(owner)) { const tab = [...owner.tabs.values()].find(t => t.view.webContents === wc); if (tab && owner.activeID !== tab.id) selectTab(owner, tab.id); }
+      else if (!owner.isDestroyed()) owner.focus();
+    },
+    removeTab(wc, owner) {
+      if (wc.isDestroyed() || owner.isDestroyed()) return;
+      if (windows.has(owner)) { const tab = [...owner.tabs.values()].find(t => t.view.webContents === wc); if (tab) closeTab(owner, tab.id); }
+      else owner.close();
+    },
+    removeWindow(owner) { if (!owner.isDestroyed()) owner.close(); },
+    requestPermissions: async () => false,
+  });
   nativeTheme.themeSource = library.settings.theme || 'system';
   installMenu();
   await library.loadExtensions();
-  createWindow(false);
+  if (![...windows].some(win => !win.private)) createWindow(false);
   app.on('activate', () => { if (![...windows].some(w => !w.private)) createWindow(false); });
 });
 app.on('before-quit', () => { saveSession(); library?.save(); passwordSync?.lock(); vault?.dispose(); });

@@ -4,7 +4,21 @@ const path = require('node:path');
 const { dialog, shell, app, session, safeStorage } = require('electron');
 const core = require('./core');
 const browsers = require('./browsers');
+const crx = require('./crx');
 function requiredName(value, max = 100) { const name = core.text(value, max); if (!name) throw new Error('名称不能为空'); return name; }
+// 扩展图标从磁盘读成 data URL：界面 CSP 不放行 file://。
+function extensionIcon(directory, manifest) {
+  const icons = manifest?.icons && typeof manifest.icons === 'object' ? manifest.icons : {};
+  const chosen = ['128', '48', '32', '16'].map(key => icons[key]).find(value => typeof value === 'string' && /\.(png|jpe?g|svg|webp)$/i.test(value));
+  if (!chosen) return '';
+  const file = path.resolve(directory, chosen);
+  if (!file.startsWith(path.resolve(directory) + path.sep)) return '';
+  try {
+    if (fs.statSync(file).size > 512 * 1024) return '';
+    const type = { svg: 'image/svg+xml', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp' }[path.extname(file).slice(1).toLowerCase()] || 'image/png';
+    return `data:${type};base64,${fs.readFileSync(file).toString('base64')}`;
+  } catch { return ''; }
+}
 
 class Library {
   constructor(userData, notify) {
@@ -218,17 +232,28 @@ class Library {
   async extensionList() {
     const result = [];
     for (const extension of this.settings.extensions || []) {
-      try { const loaded = session.fromPartition('persist:arco').extensions.getExtension(extension.id); result.push({ id: extension.id, path: extension.path, name: loaded?.name || path.basename(extension.path), enabled: !!loaded }); } catch { result.push({ ...extension, enabled: false }); }
+      try {
+        const loaded = session.fromPartition('persist:arco').extensions.getExtension(extension.id);
+        result.push({ id: extension.id, path: extension.path, name: loaded?.name || path.basename(extension.path), version: loaded?.version || '', icon: extensionIcon(extension.path, loaded?.manifest), enabled: !!loaded });
+      } catch { result.push({ ...extension, enabled: false }); }
     }
     return result;
   }
+  async setExtensionEnabled(extensionID, enabled) {
+    const record = (this.settings.extensions || []).find(x => x.id === extensionID);
+    if (!record) throw new Error('扩展不存在');
+    const ses = session.fromPartition('persist:arco');
+    if (enabled) { if (!ses.extensions.getExtension(extensionID)) await ses.extensions.loadExtension(record.path, { allowFileAccess: false }); }
+    else ses.extensions.removeExtension(extensionID);
+    record.enabled = !!enabled; this.change(); return await this.extensionList();
+  }
   async loadExtensions() {
     for (const extension of this.settings.extensions || []) {
+      if (extension.enabled === false) continue;
       try { if (fs.existsSync(path.join(extension.path, 'manifest.json'))) await session.fromPartition('persist:arco').extensions.loadExtension(extension.path, { allowFileAccess: false }); } catch (error) { this.settings.syncStatus = `扩展 ${path.basename(extension.path)} 加载失败：${error.message}`; }
     }
   }
-  async addExtension() {
-    const folder = await this.choose('directory'); if (!folder) return null;
+  async addExtension() {    const folder = await this.choose('directory'); if (!folder) return null;
     const manifest = JSON.parse(fs.readFileSync(path.join(folder, 'manifest.json'), 'utf8'));
     if (!manifest.manifest_version || !manifest.name) throw new Error('不是有效的解压扩展');
     const extension = await session.fromPartition('persist:arco').extensions.loadExtension(folder, { allowFileAccess: false });
@@ -237,6 +262,20 @@ class Library {
   async removeExtension(extensionID) {
     await session.fromPartition('persist:arco').extensions.removeExtension(extensionID);
     this.settings.extensions = (this.settings.extensions || []).filter(x => x.id !== extensionID); this.change();
+  }
+  async installFromStore(input, approve = async () => true) {
+    const storeID = crx.extensionID(input);
+    const known = (this.settings.extensions || []).find(x => x.storeID === storeID);
+    if (known && session.fromPartition('persist:arco').extensions.getExtension(known.id)) return { id: known.id, name: '', already: true };
+    const directory = path.join(path.dirname(this.file), 'Extensions', storeID);
+    const manifest = await crx.install(storeID, directory);
+    // Arco 不校验扩展签名，安装前必须让使用者看到它要什么权限。
+    const full = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8'));
+    const asked = { name: manifest.name, version: manifest.version, permissions: [...(full.permissions || []), ...(full.host_permissions || [])], optional: [...(full.optional_permissions || []), ...(full.optional_host_permissions || [])] };
+    if (!(await approve(asked))) { fs.rmSync(directory, { recursive: true, force: true }); return { cancelled: true }; }
+    const extension = await session.fromPartition('persist:arco').extensions.loadExtension(directory, { allowFileAccess: false });
+    this.settings.extensions = [...(this.settings.extensions || []).filter(x => x.id !== extension.id), { id: extension.id, path: directory, storeID }]; this.change();
+    return { id: extension.id, name: extension.name || manifest.name, version: manifest.version, already: false };
   }
 }
 module.exports = Library;
