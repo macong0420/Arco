@@ -121,11 +121,13 @@ function createTab(win, rawURL, options = {}) {
   if (!win || win.isDestroyed() || (!win.private && !library.space(options.spaceID || win.spaceID))) error('空间不存在');
   const url = rawURL && rawURL !== 'about:blank' ? (options.extensionPage ? extensionHost.url(rawURL) : core.webURL(rawURL)) : '';
   const id = options.id || core.id(), spaceID = win.private ? win.spaceID : options.spaceID || win.spaceID;
-  const view = new WebContentsView({ webPreferences: { partition: win.partition, preload: path.join(__dirname, 'page-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, safeDialogs: true } });
+  // Adopt Chromium's child WebContents so window.open keeps its opener, WindowProxy and POST body.
+  const view = options.webContents ? new WebContentsView({ webContents: options.webContents }) : new WebContentsView({ webPreferences: { partition: win.partition, preload: path.join(__dirname, 'page-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, safeDialogs: true } });
   const tab = { id, spaceID, url, title: options.title || (url ? new URL(url).hostname : '新标签页'), favicon: '', pinned: !!options.pinned, view, window: win };
   win.tabs.set(id, tab); attachTab(tab);
   if (!win.private) extensionHost.track(view.webContents, win);
-  if (url) view.webContents.loadURL(url).catch(() => {});
+  if (options.webContents) view.webContents.once('close', () => { if (!win.isDestroyed()) closeTab(win, id); });
+  else if (url) view.webContents.loadURL(url).catch(() => {});
   if (options.select !== false) selectTab(win, id); else { addPageView(win, tab, false); if (!win.private && win.tabs.has(win.activeID)) extensionHost.select(win.tabs.get(win.activeID).view.webContents); sendState(win); }
   if (!win.private) saveSession(); return tab;
 }
@@ -137,12 +139,10 @@ function popupSize(features) {
 function attachTab(tab) {
   const wc = tab.view.webContents, win = tab.window;
   wc.setWindowOpenHandler(details => {
-    if (!isHTTP(details.url)) { try { if (ALLOWED_EXTERNAL.has(new URL(details.url).protocol)) confirmExternal(win, details.url); } catch {} return { action: 'deny' }; }
-    if (details.disposition === 'new-window' && /popup|width=|height=/.test(details.features || '')) {
-      return { action: 'allow', overrideBrowserWindowOptions: { ...popupSize(details.features), titleBarStyle: 'default', autoHideMenuBar: true, minimizable: false, maximizable: false, fullscreenable: false, webPreferences: { session: session.fromPartition(win.partition), contextIsolation: true, nodeIntegration: false, sandbox: true } } };
-    }
-    createTab(win, details.url, { select: details.disposition !== 'background-tab' });
-    return { action: 'deny' };
+    if (!isHTTP(details.url) && details.url !== 'about:blank') { try { if (ALLOWED_EXTERNAL.has(new URL(details.url).protocol)) confirmExternal(win, details.url); } catch {} return { action: 'deny' }; }
+    const response = { action: 'allow', overrideBrowserWindowOptions: { ...popupSize(details.features), titleBarStyle: 'default', autoHideMenuBar: true, minimizable: false, maximizable: false, fullscreenable: false, webPreferences: { session: session.fromPartition(win.partition), preload: path.join(__dirname, 'page-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } } };
+    if (details.disposition !== 'new-window') response.createWindow = options => createTab(win, details.url, { webContents: options.webContents, select: details.disposition !== 'background-tab' }).view.webContents;
+    return response;
   });
   wc.on('did-create-window', child => { child.setMenu(null); });
   const guardNavigation = (event, url) => {
@@ -315,7 +315,7 @@ function switchSpace(win, spaceID) {
 }
 function closeTab(win, tabID) {
   const tab = win.tabs.get(tabID); if (!tab) return;
-  const wasActive = win.activeID === tabID; removePageView(win, tab); tab.view.webContents.close(); win.tabs.delete(tabID);
+  const wasActive = win.activeID === tabID; win.tabs.delete(tabID); removePageView(win, tab); tab.view.webContents.close();
   if (!win.private && isHTTP(tab.url)) closedTabs.push({ url: tab.url, title: tab.title, spaceID: tab.spaceID, closedAt: core.now() });
   if (win.splitID === tabID) win.splitID = null;
   if (wasActive) { win.activeID = null; const next = [...win.tabs.values()].find(t => t.spaceID === win.spaceID); if (next) selectTab(win, next.id); else createTab(win, '', { select: true }); }

@@ -49,8 +49,13 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     res.setHeader('Content-Type','text/html; charset=utf-8');
     if(req.url.startsWith('/welcome'))return res.end('<title>Welcome</title><h1>Signed in</h1>');
     if(req.url.startsWith('/second'))return res.end('<title>Second Fixture</title><h1>Second page</h1>');
-    if(req.url.startsWith('/oauth-provider'))return res.end('<title>OAuth Provider</title><script>try{window.opener.postMessage("code=e2e","*")}catch(e){document.title="no-opener"}setTimeout(()=>window.close(),80)</script>');
-    if(req.url.startsWith('/oauth-start'))return res.end('<title>OAuth Start</title><button id="go">第三方登录</button><div id="result">waiting</div><script>document.getElementById("go").onclick=()=>window.open("/oauth-provider","auth","width=420,height=520");window.addEventListener("message",e=>{document.getElementById("result").textContent="got:"+e.data})</script>');
+    if(req.url.startsWith('/oauth-provider'))return res.end('<title>OAuth Provider</title><script>try{if(typeof require!=="undefined"||window.arco)throw new Error("unsafe context");window.opener.postMessage("code=e2e","*")}catch(e){document.title="no-opener"}setTimeout(()=>window.close(),80)</script>');
+    if(req.url.startsWith('/oauth-frame'))return res.end('<button id="frame-go">登录</button><script>document.getElementById("frame-go").onclick=()=>window.open("/oauth-provider","auth");window.addEventListener("message",e=>parent.postMessage(e.data,"*"))</script>');
+    if(req.url.startsWith('/oauth-start')){
+      const mode=new URL(req.url,'http://localhost').searchParams.get('mode');
+      const open=mode==='tab'?'window.open("/oauth-provider","auth")':mode==='blank'?'(() => {const p=window.open("","auth");p.location.href="/oauth-provider"})()':'window.open("/oauth-provider","auth","width=420,height=520")';
+      return res.end(`<title>OAuth Start</title><button id="go">第三方登录</button><div id="result">waiting</div>${mode==='iframe'||mode==='cross-origin'?`<iframe src="${mode==='cross-origin'?origin.replace('127.0.0.1','localhost'):origin}/oauth-frame"></iframe>`:''}<script>document.getElementById("go").onclick=()=>${open};window.addEventListener("message",e=>{document.getElementById("result").textContent="got:"+e.data})</script>`);
+    }
     res.end(fixture);
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve)); origin='http://127.0.0.1:'+server.address().port;
@@ -66,6 +71,20 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     const iconResult=await shell.evaluate(url=>{const holder=document.createElement('div');holder.innerHTML=favicon({favicon:url})+'<span>Title</span>';document.body.append(holder);holder.querySelector('img').dispatchEvent(new Event('error'));const result={text:holder.textContent,fallback:!!holder.querySelector('svg'),inlineHandlers:holder.querySelectorAll('[onerror]').length};holder.remove();return result;},origin+'/broken-icon.ico');
     assert.deepEqual(iconResult,{text:'Title',fallback:true,inlineHandlers:0});
     await inspect('capture',{name:'loaded-page'});
+  });
+  await t.test('featureless and initially blank login tabs preserve the native opener',async()=>{
+    for(const mode of ['tab','blank','iframe','cross-origin']){
+      const url=origin+'/oauth-start?mode='+mode;
+      await invoke('new-tab',{url});const page=await remote(url);
+      const windowCount=await app.evaluate(({BaseWindow})=>BaseWindow.getAllWindows().length);
+      if(mode==='iframe'||mode==='cross-origin')await page.frameLocator('iframe').locator('#frame-go').click();else await page.locator('#go').click();
+      await assertEventually(async()=>(await page.locator('#result').textContent())==='got:code=e2e');
+      await waitState(s=>!s.tabs.some(tab=>tab.url&&new URL(tab.url).pathname==='/oauth-provider'));
+      assert.equal(await app.evaluate(({BaseWindow})=>BaseWindow.getAllWindows().length),windowCount,'featureless opens stay in tabs');
+      const parent=(await inspect('state')).tabs.find(tab=>tab.url===url);
+      assert(parent,'the opener must remain open');
+      await invoke('close-tab',{id:parent.id});
+    }
   });
   await t.test('compact toolbar, collapsed safe area and permanent shortcuts work through the UI',async()=>{
     const rowIcon=shell.locator('#tabs [data-select-tab] img').first();await rowIcon.waitFor();
@@ -169,7 +188,7 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
   });
   await t.test('private windows are isolated from normal and from later private windows',async()=>{
     async function openPrivate(){await invoke('private-window');let p;await assertEventually(async()=>{p=(await app.windows()).find(p=>p!==shell&&/shell\.html$/.test(p.url()));return !!p;});await p.waitForFunction(()=>!!window.arco);return p;}
-    async function closePrivate(p){await Promise.all([p.waitForEvent('close'),inspect('close-window',{},p)]);}
+    async function closePrivate(p){const closed=p.waitForEvent('close');await Promise.all([closed,inspect('close-window',{},p).catch(()=>closed)]);}
     let privateShell=await openPrivate();await invoke('navigate',{input:origin+'/'},privateShell);
     assert.equal(await inspect('evaluate',{script:'document.cookie'},privateShell),'');
     await inspect('evaluate',{script:"document.cookie='private=only'"},privateShell);
@@ -179,7 +198,7 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
   });
   await t.test('deleting the inherited ordinary space keeps the private page usable',async()=>{
     async function openPrivate(){await invoke('private-window');let p;await assertEventually(async()=>{p=(await app.windows()).find(p=>p!==shell&&/shell\.html$/.test(p.url()));return !!p;});await p.waitForFunction(()=>!!window.arco);return p;}
-    async function closePrivate(p){await Promise.all([p.waitForEvent('close'),inspect('close-window',{},p)]);}
+    async function closePrivate(p){const closed=p.waitForEvent('close');await Promise.all([closed,inspect('close-window',{},p).catch(()=>closed)]);}
     const privateShell=await openPrivate(),pageURL=origin+'/private-keep';
     await invoke('navigate',{input:pageURL},privateShell); await remote(pageURL);
     await inspect('evaluate',{script:"document.cookie='private=kept; SameSite=Lax'"},privateShell);
