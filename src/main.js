@@ -6,6 +6,8 @@ const os = require('node:os');
 const core = require('./core');
 const Library = require('./library');
 const browsers = require('./browsers');
+const browserMigration = require('./browser-migration');
+let migrationPending = false;
 const { createExtensionHost } = require('./extension-host');
 const { EncryptedVault, MemoryVault } = require('./vault');
 const { PasswordSync, mergeCredentials } = require('./password-sync');
@@ -396,7 +398,7 @@ function setupSession(ses) {
     item.once('done', (_, state) => { if (!downloads.has(record.id)) return; record.state = state; record.path = item.getSavePath(); broadcast(); }); broadcast();
   });
 }
-const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'import-browser', 'chrome-extensions', 'import-chrome-extensions', 'install-extension-store', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-delete', 'download-open', 'download-reveal', 'download-cancel', 'find', 'find-stop', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'extension-list', 'extension-toggle', 'extension-popup', 'copy', 'menu', 'confirm-clear']);
+const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'migrate-browser-data', 'import-browser', 'chrome-extensions', 'import-chrome-extensions', 'install-extension-store', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-delete', 'download-open', 'download-reveal', 'download-cancel', 'find', 'find-stop', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'extension-list', 'extension-toggle', 'extension-popup', 'copy', 'menu', 'confirm-clear']);
 function trustedWindow(event) {
   const win = [...windows].find(w => w.shell.webContents === event.sender);
   if (!win || event.senderFrame !== win.shell.webContents.mainFrame || event.senderFrame.url !== pathToFileURL(path.join(__dirname, 'shell.html')).href) error('未授权的界面请求');
@@ -470,6 +472,18 @@ ipcMain.handle('arco:invoke', async (event, message) => {
       case 'delete-folder': library.deleteFolder(bounded(a.id, 128), !!a.removeContents); broadcast(); break;
       case 'import-bookmarks': { const file = a.path || await library.choose('file'); if (file) await library.importFile(file, win.spaceID); broadcast(); break; }
       case 'browser-sources': return browsers.detect();
+      case 'migrate-browser-data': {
+        if (win.private) error('无痕窗口不能迁移密码或 Cookie');
+        if (migrationPending) error('数据迁移正在进行，请稍候');
+        const id = bounded(a.id, 200);
+        if (!Array.isArray(a.choices) || !a.choices.length || a.choices.some(item => !['passwords', 'cookies'].includes(item))) error('请选择要迁移的数据');
+        const accepted = await dialog.showMessageBox(win, { type: 'question', buttons: ['取消', '迁移所选数据'], defaultId: 0, cancelId: 0, message: '将所选浏览器的密码或登录 Cookie 导入 Arco？', detail: '密码将存入本机加密保险库；Cookie 可能让网站在 Arco 中保持登录。已有记录会跳过，原浏览器数据不会修改。随后可能需要批准系统认证及浏览器钥匙串访问。' });
+        if (accepted.response !== 1) return null;
+        if (migrationPending) error('数据迁移正在进行，请稍候');
+        migrationPending = true;
+        try { return await browserMigration.migrate(id, a.choices, { vault, cookies: session.fromPartition(normalSession).cookies }); }
+        finally { migrationPending = false; }
+      }
       case 'import-browser': { const count = await library.importBrowser(bounded(a.id, 200), win.spaceID); broadcast(); return count; }
       case 'chrome-extensions': if (win.private) error('无痕窗口不能管理扩展'); return browsers.chromeExtensions().map(profile => ({ ...profile, extensions: profile.extensions.map(({ source, ...item }) => item) }));
       case 'import-chrome-extensions': if (win.private) error('无痕窗口不能安装扩展'); return await library.importChromeExtensions(bounded(a.profileID, 200), a.ids);
@@ -509,7 +523,17 @@ ipcMain.handle('arco:invoke', async (event, message) => {
       case 'capture-save': { if (!win.capture) error('没有待保存的密码'); const capture = win.capture; await vault.save({ origin: capture.origin, username: capture.username, password: capture.password }); win.capture = null; sendState(win); break; }
       case 'capture-dismiss': win.capture = null; sendState(win); break;
       case 'generate-password': return require('node:crypto').randomBytes(24).toString('base64url') + '-A9!';
-      case 'import-passwords': { const file = await library.choose('file'); if (!file) return 0; const rows = core.parseCSV(fs.readFileSync(file, 'utf8')); for (const row of rows) await vault.save(row); return rows.length; }
+      case 'import-passwords': {
+        if (win.private) error('无痕窗口不能导入密码');
+        if (migrationPending) error('数据迁移正在进行，请稍候');
+        const file = await library.choose('file'); if (!file) return null;
+        if (migrationPending) error('数据迁移正在进行，请稍候');
+        migrationPending = true;
+        try {
+          if (fs.statSync(file).size > 20_000_000) error('CSV 文件过大');
+          return await vault.importCredentials(core.parseCSV(fs.readFileSync(file, 'utf8')));
+        } finally { migrationPending = false; }
+      }
       case 'export-passwords': { if (win.private) error('无痕窗口不能导出密码'); const accepted = await dialog.showMessageBox(win, {type:'warning', buttons:['取消','导出明文'],defaultId:0,cancelId:0,message:'导出的 CSV 包含未加密密码。确定继续？'}); if (accepted.response !== 1) return false; await vault.authenticate(); const result = await dialog.showSaveDialog(win, { defaultPath: 'Arco-Passwords.csv', filters: [{ name: '明文 CSV（请妥善保管）', extensions: ['csv'] }] }); if (!result.filePath) return false; const credentials = await vault.list(), lines = ['name,url,username,password']; for (const item of credentials) { const full = await vault.read(item.id); const escape = value => '"' + String(value).replaceAll('"', '""') + '"'; lines.push([full.title, full.origin, full.username, full.password].map(escape).join(',')); } fs.writeFileSync(result.filePath, '\ufeff' + lines.join('\n'), { mode: 0o600 }); return true; }
       case 'add-extension': if (win.private) error('无痕窗口不能安装扩展'); return await library.addExtension();
       case 'extension-list': if (win.private) error('无痕窗口不能管理扩展'); return await library.extensionList();

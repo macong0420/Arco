@@ -59,22 +59,45 @@ class MemoryVault {
   async persist(value) { this.state = validateVault(value); }
   async load() { return this.state; }
   async list() { return (await this.load()).records.map(metadata); }
+  write(update) {
+    const pending = (this.pending || Promise.resolve()).then(async () => update(await this.load()));
+    this.pending = pending.catch(() => {});
+    return pending;
+  }
   async save(value) {
-    const state = await this.load();
-    core.exactOrigin(value.origin);
-    const origin = core.exactOrigin(value.origin), username = value.username || '';
-    const previous = state.records.find(record => (value.id && record.id === value.id) || (record.origin === origin && record.username === username));
-    const identity = crypto.createHash('sha256').update(JSON.stringify([origin, username])).digest('hex');
-    const record = validateCredential({ ...value, id: previous?.id || identity, updatedAt: core.now() });
-    const next = { records: state.records.filter(x => x.id !== record.id).concat(record), tombstones: { ...state.tombstones } };
-    delete next.tombstones[record.id]; await this.persist(next); return metadata(record);
+    return this.write(async state => {
+      core.exactOrigin(value.origin);
+      const origin = core.exactOrigin(value.origin), username = value.username || '';
+      const previous = state.records.find(record => (value.id && record.id === value.id) || (record.origin === origin && record.username === username));
+      const identity = crypto.createHash('sha256').update(JSON.stringify([origin, username])).digest('hex');
+      const record = validateCredential({ ...value, id: previous?.id || identity, updatedAt: core.now() });
+      const next = { records: state.records.filter(x => x.id !== record.id).concat(record), tombstones: { ...state.tombstones } };
+      delete next.tombstones[record.id]; await this.persist(next); return metadata(record);
+    });
+  }
+  async importCredentials(records) {
+    await this.authenticate();
+    const checked = records.map(value => { core.exactOrigin(value.origin); return validateCredential(value); });
+    return this.write(async state => {
+      const next = { records: [...state.records], tombstones: { ...state.tombstones } };
+      const known = new Set(next.records.map(item => JSON.stringify([item.origin, item.username])));
+      let imported = 0, skipped = 0;
+      for (const record of checked) {
+        const identity = JSON.stringify([record.origin, record.username]);
+        if (known.has(identity)) { skipped++; continue; }
+        record.id = crypto.createHash('sha256').update(identity).digest('hex');
+        next.records.push(record); delete next.tombstones[record.id]; known.add(identity); imported++;
+      }
+      if (imported) await this.persist(next);
+      return { imported, skipped };
+    });
   }
   async authenticate() { return true; }
   async read(id) { await this.authenticate(); const record = (await this.load()).records.find(x => x.id === id); if (!record) throw new Error('没有找到此密码'); return { ...record }; }
   async fill(id, origin) { const item = (await this.load()).records.find(x => x.id === id); if (!item || !core.originAllowed(item.origin, origin)) throw new Error('来源不匹配，已拒绝填充'); return this.read(id); }
-  async remove(id) { await this.authenticate(); const state = await this.load(); await this.persist({ records: state.records.filter(x => x.id !== id), tombstones: { ...state.tombstones, [id]: core.now() } }); }
+  async remove(id) { await this.authenticate(); return this.write(state => this.persist({ records: state.records.filter(x => x.id !== id), tombstones: { ...state.tombstones, [id]: core.now() } })); }
   async exportState() { await this.authenticate(); return structuredClone(await this.load()); }
-  async importState(value) { await this.persist(validateVault(structuredClone(value))); }
+  async importState(value) { const next = validateVault(structuredClone(value)); await this.write(() => this.persist(next)); }
   status() { return { backend: '测试内存保险库', nativeICloud: false }; }
   dispose() { this.state = { records: [], tombstones: {} }; }
 }
