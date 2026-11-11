@@ -130,3 +130,47 @@ test('importBrowser only accepts detected ids and skips duplicates on a second r
   await assert.rejects(() => library.importBrowser('chrome:../../../../etc/passwd', 'personal'), /没有找到/);
   await assert.rejects(() => library.importBrowser('', 'personal'), /没有找到/);
 });
+
+test('Chrome extensions use the active version, localization and old/new enable states', t => {
+  const home = fakeHome(t), chrome = support(home, 'Google/Chrome');
+  const active = 'a'.repeat(32), disabled = 'b'.repeat(32), component = 'c'.repeat(32), legacy = 'd'.repeat(32);
+  write(path.join(chrome, 'Local State'), { profile: { info_cache: { Default: { name: '工作' }, 'Profile 1': { name: '个人' } } } });
+  const profile = path.join(chrome, 'Default');
+  fs.mkdirSync(path.join(chrome, 'Profile 1'), { recursive: true });
+  write(path.join(profile, 'Secure Preferences'), { extensions: { settings: {
+    [active]: { path: `${active}/1.0.0_0`, disable_reasons: [] },
+    [disabled]: { disable_reasons: [1] }, [component]: { location: 10 }, [legacy]: { state: 0 },
+  } } });
+  for (const [id, version] of [[active, '1.0.0'], [active, '1.10.0'], [disabled, '1.0.0'], [component, '1.0.0'], [legacy, '1.0.0']]) {
+    const dir = path.join(profile, 'Extensions', id, version + '_0');
+    write(path.join(dir, 'manifest.json'), { manifest_version: 3, name: '__MSG_name__', default_locale: 'en', version, permissions: ['storage'], host_permissions: ['https://example.com/*'] });
+    write(path.join(dir, '_locales/en/messages.json'), { name: { message: 'Localized extension' } });
+  }
+  const [work, personal] = browsers.chromeExtensions(home);
+  assert.equal(work.id, 'chrome:Default');
+  assert.equal(work.extensions.length, 3);
+  assert.deepEqual(work.extensions.map(item => [item.id, item.version, item.enabled]), [[active, '1.0.0', true], [disabled, '1.0.0', false], [legacy, '1.0.0', false]]);
+  assert.equal(work.extensions[0].name, 'Localized extension');
+  assert.deepEqual(work.extensions[0].permissions, ['storage', 'https://example.com/*']);
+  assert.deepEqual(personal.extensions, []);
+  fs.chmodSync(path.join(profile, 'Secure Preferences'), 0o000);
+  assert.match(browsers.chromeExtensions(home)[0].note, /完全磁盘访问权限/);
+});
+
+test('Chrome extension discovery rejects source paths outside its extension directory', t => {
+  const home = fakeHome(t), chrome = support(home, 'Google/Chrome');
+  const source = path.join(home, 'elsewhere');
+  write(path.join(source, '1.0.0/manifest.json'), { manifest_version: 3, name: 'Outside', version: '1.0.0' });
+  const folder = path.join(chrome, 'Default/Extensions');
+  fs.mkdirSync(folder, { recursive: true });
+  fs.symlinkSync(source, path.join(folder, 'a'.repeat(32)));
+  assert.match(browsers.chromeExtensions(home)[0].extensions[0].error, /越界/);
+});
+
+test('extension migration, store installation and removal share the install guard', async t => {
+  const library = new Library(path.join(fakeHome(t), 'data'), () => {});
+  library.installingExtensions = true;
+  await assert.rejects(() => library.importChromeExtensions('chrome:Default', ['a'.repeat(32)]), /正在安装/);
+  await assert.rejects(() => library.installFromStore('a'.repeat(32)), /正在安装/);
+  await assert.rejects(() => library.removeExtension('a'.repeat(32)), /正在安装/);
+});

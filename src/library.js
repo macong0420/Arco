@@ -184,6 +184,47 @@ class Library {
     if (entry.kind === 'arc') return this.importFile(entry.file, spaceID);
     return this.importBookmarks(entry.items, spaceID);
   }
+  async importChromeExtensions(profileID, ids) {
+    if (this.installingExtensions) throw new Error('扩展正在安装，请稍候');
+    if (!Array.isArray(ids) || !ids.length || ids.length > 200 || ids.some(id => typeof id !== 'string' || !crx.ID.test(id))) throw new Error('请选择有效的 Chrome 扩展（最多 200 个）');
+    const profile = browsers.chromeExtensions().find(profile => profile.id === profileID);
+    if (!profile) throw new Error('没有找到这个 Chrome 个人资料');
+    if (profile.note) throw new Error(profile.note);
+    const ses = session.fromPartition('persist:arco'), results = [];
+    this.installingExtensions = true;
+    try {
+      for (const storeID of new Set(ids)) {
+        const item = profile.extensions.find(item => item.id === storeID);
+        const known = (this.settings.extensions || []).find(record => record.storeID === storeID);
+        let directory, loaded;
+        try {
+          if (!item || item.error) throw new Error(item?.error || 'Chrome 中没有找到这个扩展');
+          if (known) {
+            if (known.enabled !== false && !ses.extensions.getExtension(known.id)) await ses.extensions.loadExtension(known.path, { allowFileAccess: false });
+            results.push({ id: storeID, name: item.name, already: true }); continue;
+          }
+          const destination = path.join(path.dirname(this.file), 'Extensions', storeID);
+          if (fs.existsSync(destination)) throw new Error('目标目录已存在，未覆盖，请先移除旧扩展再重试');
+          directory = destination;
+          fs.cpSync(item.source, directory, { recursive: true, force: false, errorOnExist: true, filter: source => {
+            if (fs.lstatSync(source).isSymbolicLink()) throw new Error('扩展包含符号链接，无法迁移');
+            return true;
+          } });
+          loaded = await ses.extensions.loadExtension(directory, { allowFileAccess: false });
+          if (!ses.extensions.getExtension(loaded.id)) throw new Error('扩展未能加载');
+          if (!item.enabled) ses.extensions.removeExtension(loaded.id);
+          this.settings.extensions = [...(this.settings.extensions || []), { id: loaded.id, path: directory, storeID, enabled: item.enabled }];
+          this.change();
+          results.push({ id: storeID, name: loaded.name, version: loaded.version, enabled: item.enabled });
+        } catch (error) {
+          if (loaded) { ses.extensions.removeExtension(loaded.id); this.settings.extensions = this.settings.extensions.filter(record => record.id !== loaded.id); }
+          if (directory) fs.rmSync(directory, { recursive: true, force: true });
+          results.push({ id: storeID, name: item?.name || storeID, error: error.message });
+        }
+      }
+    } finally { this.installingExtensions = false; }
+    return results;
+  }
   async exportFile(spaceID) {
     const result = await dialog.showSaveDialog({ defaultPath: 'Arco-Bookmarks.html', filters: [{ name: 'HTML 书签', extensions: ['html'] }] });
     if (result.canceled || !result.filePath) return false;
@@ -260,22 +301,32 @@ class Library {
     this.settings.extensions = [...(this.settings.extensions || []).filter(x => x.id !== extension.id), { id: extension.id, path: folder }]; this.change(); return extension;
   }
   async removeExtension(extensionID) {
-    await session.fromPartition('persist:arco').extensions.removeExtension(extensionID);
-    this.settings.extensions = (this.settings.extensions || []).filter(x => x.id !== extensionID); this.change();
+    if (this.installingExtensions) throw new Error('扩展正在安装，请稍候');
+    this.installingExtensions = true;
+    try {
+      const record = (this.settings.extensions || []).find(record => record.id === extensionID);
+      session.fromPartition('persist:arco').extensions.removeExtension(extensionID);
+      if (record?.storeID && crx.ID.test(record.storeID) && record.path === path.join(path.dirname(this.file), 'Extensions', record.storeID)) fs.rmSync(record.path, { recursive: true, force: true });
+      this.settings.extensions = (this.settings.extensions || []).filter(x => x.id !== extensionID); this.change();
+    } finally { this.installingExtensions = false; }
   }
   async installFromStore(input, approve = async () => true) {
-    const storeID = crx.extensionID(input);
-    const known = (this.settings.extensions || []).find(x => x.storeID === storeID);
-    if (known && session.fromPartition('persist:arco').extensions.getExtension(known.id)) return { id: known.id, name: '', already: true };
-    const directory = path.join(path.dirname(this.file), 'Extensions', storeID);
-    const manifest = await crx.install(storeID, directory);
-    // Arco 不校验扩展签名，安装前必须让使用者看到它要什么权限。
-    const full = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8'));
-    const asked = { name: manifest.name, version: manifest.version, permissions: [...(full.permissions || []), ...(full.host_permissions || [])], optional: [...(full.optional_permissions || []), ...(full.optional_host_permissions || [])] };
-    if (!(await approve(asked))) { fs.rmSync(directory, { recursive: true, force: true }); return { cancelled: true }; }
-    const extension = await session.fromPartition('persist:arco').extensions.loadExtension(directory, { allowFileAccess: false });
-    this.settings.extensions = [...(this.settings.extensions || []).filter(x => x.id !== extension.id), { id: extension.id, path: directory, storeID }]; this.change();
-    return { id: extension.id, name: extension.name || manifest.name, version: manifest.version, already: false };
+    if (this.installingExtensions) throw new Error('扩展正在安装，请稍候');
+    this.installingExtensions = true;
+    try {
+      const storeID = crx.extensionID(input);
+      const known = (this.settings.extensions || []).find(x => x.storeID === storeID);
+      if (known && session.fromPartition('persist:arco').extensions.getExtension(known.id)) return { id: known.id, name: '', already: true };
+      const directory = path.join(path.dirname(this.file), 'Extensions', storeID);
+      const manifest = await crx.install(storeID, directory);
+      // Arco 不校验扩展签名，安装前必须让使用者看到它要什么权限。
+      const full = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8'));
+      const asked = { name: manifest.name, version: manifest.version, permissions: [...(full.permissions || []), ...(full.host_permissions || [])], optional: [...(full.optional_permissions || []), ...(full.optional_host_permissions || [])] };
+      if (!(await approve(asked))) { fs.rmSync(directory, { recursive: true, force: true }); return { cancelled: true }; }
+      const extension = await session.fromPartition('persist:arco').extensions.loadExtension(directory, { allowFileAccess: false });
+      this.settings.extensions = [...(this.settings.extensions || []).filter(x => x.id !== extension.id), { id: extension.id, path: directory, storeID }]; this.change();
+      return { id: extension.id, name: extension.name || manifest.name, version: manifest.version, already: false };
+    } finally { this.installingExtensions = false; }
   }
 }
 module.exports = Library;

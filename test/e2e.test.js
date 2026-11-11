@@ -245,6 +245,19 @@ test('first launch walks the welcome onboarding and never shows it again',{timeo
   fs.mkdirSync(path.join(chrome,'Default'),{recursive:true});
   fs.writeFileSync(path.join(chrome,'Local State'),JSON.stringify({profile:{info_cache:{Default:{name:'默认'}},profiles_order:['Default']}}));
   fs.writeFileSync(path.join(chrome,'Default','Bookmarks'),JSON.stringify({roots:{bookmark_bar:{type:'folder',name:'书签栏',children:[{type:'url',name:'Tour Page',url:'https://tour.test/'}]}}}));
+  const activeID = 'a'.repeat(32), disabledID = 'b'.repeat(32), brokenID = 'c'.repeat(32), linkedID = 'd'.repeat(32);
+  const extensionRoot = path.join(chrome, 'Default', 'Extensions');
+  for (const [id, name, version] of [[activeID, 'Migrated Chrome Extension', '1.0.0'], [disabledID, 'Disabled Chrome Extension', '1.0.0'], [brokenID, 'Broken Chrome Extension', 'invalid'], [linkedID, 'Linked Chrome Extension', '1.0.0']]) {
+    const dir = path.join(extensionRoot, id, '1.0.0_0');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({ manifest_version: 3, name, version, content_scripts: [{ matches: ['http://127.0.0.1/*'], js: ['cs.js'] }] }));
+    fs.writeFileSync(path.join(dir, 'cs.js'), `document.documentElement.dataset.${id === disabledID ? 'arcoDisabled' : 'arcoChromeMigration'} = chrome.runtime.id;`);
+  }
+  fs.symlinkSync(path.join(chrome, 'Local State'), path.join(extensionRoot, linkedID, '1.0.0_0', 'link'));
+  fs.writeFileSync(path.join(chrome, 'Default', 'Secure Preferences'), JSON.stringify({ extensions: { settings: { [activeID]: { disable_reasons: [] }, [disabledID]: { disable_reasons: [1] } } } }));
+  const site = http.createServer((_req, res) => { res.setHeader('Content-Type', 'text/html'); res.end('<!doctype html><title>Migration Fixture</title><h1>Migration</h1>'); });
+  await new Promise(resolve => site.listen(0, '127.0.0.1', resolve));
+  const siteURL = `http://127.0.0.1:${site.address().port}/`;
   const env={...process.env,ARCO_TEST_MODE:'1',ARCO_USER_DATA_DIR:folder,ARCO_BROWSER_HOME:home};
   async function open(){
     const instance=await electron.launch({args:[root],env,timeout:15000});let page=null;
@@ -262,6 +275,32 @@ test('first launch walks the welcome onboarding and never shows it again',{timeo
     await page.click('#onboard-sources [data-import-browser]');
     await assertEventually(async()=>(await state()).allBookmarks.some(x=>x.url==='https://tour.test/'));
     await page.click('[data-action="onboard-next"]');
+    await page.waitForSelector('[data-onboarding="extensions"] [data-import-chrome]');
+    await page.check(`[data-chrome-extension="${disabledID}"]`);
+    await page.click('[data-import-chrome]');
+    await page.waitForFunction(() => /已安装并启用/.test(document.querySelector('[data-chrome-result]')?.textContent || ''));
+    assert.match(await page.textContent('[data-chrome-result]'), /Disabled Chrome Extension：已安装，保持停用/);
+    assert.match(await page.textContent('[data-chrome-result]'), /Broken Chrome Extension：/);
+    assert.match(await page.textContent('[data-chrome-result]'), /Linked Chrome Extension：扩展包含符号链接/);
+    await page.click('[data-action="onboard-back"]');
+    await page.click('[data-action="onboard-next"]');
+    await page.waitForFunction(() => /Linked Chrome Extension：扩展包含符号链接/.test(document.querySelector('[data-chrome-result]')?.textContent || ''));
+    const records = (await state()).settings.extensions;
+    assert.equal(records.length, 2);
+    const activeRecord = records.find(record => record.storeID === activeID);
+    assert.equal(records.find(record => record.storeID === disabledID).enabled, false);
+    assert.equal(fs.existsSync(path.join(folder, 'Extensions', brokenID)), false);
+    assert.equal(fs.existsSync(path.join(folder, 'Extensions', linkedID)), false);
+    // 重试跳过已有记录，伪造资料或目录逃逸 ID 被拒绝。
+    const retry = await invoke('import-chrome-extensions', { profileID: 'chrome:Default', ids: [activeID] }, page);
+    assert.equal(retry[0].already, true);
+    await invoke('remove-extension', { id: activeRecord.id }, page);
+    assert.equal(fs.existsSync(activeRecord.path), false);
+    const reimport = await invoke('import-chrome-extensions', { profileID: 'chrome:Default', ids: [activeID] }, page);
+    assert.equal(reimport[0].enabled, true);
+    await assert.rejects(() => invoke('import-chrome-extensions', { profileID: 'chrome:../../etc', ids: [activeID] }, page), /没有找到/);
+    await assert.rejects(() => invoke('import-chrome-extensions', { profileID: 'chrome:Default', ids: ['../../etc'] }, page), /有效的 Chrome 扩展/);
+    await page.click('[data-action="onboard-next"]');
     await page.waitForSelector('[data-onboarding="sites"] .onboard-site');
     await page.click('[data-onboard-site="https://github.com"]');
     await assertEventually(async()=>(await state()).favorites.some(x=>x.url==='https://github.com/'));
@@ -276,13 +315,29 @@ test('first launch walks the welcome onboarding and never shows it again',{timeo
     await page.click('[data-action="onboard-next"]');
     await page.waitForFunction(()=>!document.querySelector('[data-onboarding]'));
     await assertEventually(async()=>(await state()).settings.onboarded===true);
+    await invoke('new-tab', { url: siteURL }, page);
+    let migratedPage;
+    await assertEventually(async () => { migratedPage = (await first.instance.windows()).find(p => p.url() === siteURL); return !!migratedPage; });
+    await migratedPage.waitForFunction(() => !!document.documentElement.dataset.arcoChromeMigration);
+    assert.equal(await migratedPage.evaluate(() => document.documentElement.dataset.arcoChromeMigration), activeRecord.id);
+    assert.equal(await migratedPage.evaluate(() => document.documentElement.dataset.arcoDisabled), undefined);
     await first.instance.close().catch(()=>{});first=null;
+    // 删除源浏览器目录，证明 Arco 使用自己的副本，重启后仍实际注入网页。
+    fs.rmSync(extensionRoot, { recursive: true, force: true });
     second=await open();
     await new Promise(r=>setTimeout(r,500));
     assert.equal(await second.page.$('[data-onboarding]'),null,'onboarding must not come back on the second launch');
     assert((await second.state()).settings.theme==='dark');
+    let restored;
+    await assertEventually(async () => { restored = (await second.instance.windows()).find(p => p.url() === siteURL); return !!restored; });
+    await restored.waitForFunction(() => !!document.documentElement.dataset.arcoChromeMigration);
+    assert.equal(await restored.evaluate(() => document.documentElement.dataset.arcoChromeMigration), activeRecord.id);
+    const list = await invoke('extension-list', {}, second.page);
+    assert.equal(list.find(item => item.id === activeRecord.id).enabled, true);
+    assert.equal(list.filter(item => !item.enabled).length, 1);
   } finally {
     await first?.instance.close().catch(()=>{});await second?.instance.close().catch(()=>{});
+    await new Promise(resolve => site.close(resolve));
     fs.rmSync(folder,{recursive:true,force:true});fs.rmSync(home,{recursive:true,force:true});
   }
 });

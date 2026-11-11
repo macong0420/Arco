@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const core = require('./core');
+const { ID } = require('./crx');
 
 const LIMIT = 32 * 1024 * 1024;
 // 只从这份固定清单里找书签；路径永远不来自界面。
@@ -139,4 +140,47 @@ function resolve(id, dir = home()) {
   if (!entry) throw new Error('没有找到这个浏览器的书签');
   return { ...entry, items: entry.kind === 'arc' ? null : read(entry) };
 }
-module.exports = { detect, resolve, list };
+// Chrome 的扩展文件按个人资料读取；界面只传资料 ID 与扩展 ID，不接受路径。
+function chromeExtensions(dir = home()) {
+  const root = path.join(support(dir), 'Google/Chrome');
+  if (!present(root)) return [];
+  return chromiumProfiles(root).filter(profile => present(profile.dir)).map(profile => {
+    const result = { id: `chrome:${profile.folder}`, label: profile.label, extensions: [], note: '' };
+    try {
+      const settings = {};
+      for (const file of ['Preferences', 'Secure Preferences']) {
+        try { Object.assign(settings, JSON.parse(fs.readFileSync(path.join(profile.dir, file), 'utf8')).extensions?.settings || {}); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
+      const base = path.join(profile.dir, 'Extensions');
+      if (!present(base)) return result;
+      for (const id of fs.readdirSync(base).filter(id => ID.test(id))) {
+        try {
+          const record = settings[id];
+          // Chrome 自带的组件扩展不迁移。
+          if (record?.location === 5 || record?.location === 10) continue;
+          const folder = path.join(base, id);
+          const versions = fs.readdirSync(folder).filter(v => /^\d+(?:\.\d+)*(?:_\d+)?$/.test(v)).sort((a, b) => b.localeCompare(a, 'en', { numeric: true }));
+          const current = typeof record?.path === 'string' ? path.basename(record.path) : '';
+          const version = versions.includes(current) ? current : versions[0];
+          if (!version) continue;
+          const source = path.join(folder, version);
+          if (!fs.realpathSync(source).startsWith(path.join(fs.realpathSync(profile.dir), 'Extensions') + path.sep)) throw new Error('扩展目录包含越界链接');
+          const manifest = JSON.parse(fs.readFileSync(path.join(source, 'manifest.json'), 'utf8'));
+          if (!manifest.name || !manifest.version || !manifest.manifest_version) throw new Error('扩展清单不完整');
+          let name = manifest.name;
+          const key = /^__MSG_(.+)__$/.exec(name)?.[1];
+          if (key && /^[\w-]+$/.test(manifest.default_locale || '')) {
+            const messages = JSON.parse(fs.readFileSync(path.join(source, '_locales', manifest.default_locale, 'messages.json'), 'utf8'));
+            name = messages[key]?.message || name;
+          }
+          result.extensions.push({ id, name, version: manifest.version, enabled: record?.state === undefined ? !(Array.isArray(record?.disable_reasons) ? record.disable_reasons.length : record?.disable_reasons) : record.state === 1, permissions: [...(manifest.permissions || []), ...(manifest.host_permissions || [])], source });
+        } catch (error) {
+          result.extensions.push({ id, name: id, error: error.code === 'EPERM' || error.code === 'EACCES' ? permissionError('Chrome').message : error.message });
+        }
+      }
+    } catch (error) { result.note = error.code === 'EPERM' || error.code === 'EACCES' ? permissionError('Chrome').message : `Chrome 扩展读取失败：${error.message}`; }
+    return result;
+  });
+}
+module.exports = { detect, resolve, list, chromeExtensions };

@@ -171,7 +171,7 @@ function settingsHTML(section) {
   if (section === 'bookmarks') content = `<section class="settings-section"><h2>书签与导入</h2><p class="description">收藏磁贴在所有空间共享。固定书签可放入任意层级文件夹，保存在当前空间。</p><div class="actions" style="justify-content:flex-start">${button('添加当前页为书签', 'add-current-bookmark')}${button('添加当前页到收藏', 'add-current-favorite')}${button('新建文件夹', 'folder-dialog')}</div><h3>从浏览器导入</h3><p class="description">直接读取本机已安装浏览器的书签，导入到当前空间「${esc(space()?.name || '')}」：保留文件夹层级，重复网址跳过，不读取密码、历史、Cookie 或登录状态。Safari 的书签文件受 macOS 保护，需要授予完全磁盘访问权限。</p><div class="list" id="browser-sources"><div class="empty">正在检测浏览器…</div></div><h3>从文件导入</h3><p class="description">仅读取你明确选择的文件。支持 Netscape HTML、Chromium Bookmarks JSON、Arc StorableSidebar.json（空间名、固定页面及文件夹路径；支持经典与 Arc Sync 侧栏数据）。</p><div class="actions" style="justify-content:flex-start">${button('选择文件导入', 'import-bookmarks', 'button primary')}${button('导出全部书签为 HTML', 'export-bookmarks')}</div><h3>固定书签</h3><div class="list">${state.allBookmarks.length ? state.allBookmarks.map(b => `<div class="list-row">${icon('bookmark')}<div class="grow"><strong>${esc(b.title)}</strong><small>${esc(spaceName(b.spaceID))} · ${esc(b.url)}</small></div><button class="icon" data-edit-bookmark="${attr(b.id)}" title="编辑">${icon('edit')}</button><button class="icon" data-delete-bookmark="${attr(b.id)}" title="删除">${icon('trash')}</button></div>`).join('') : '<div class="empty">还没有固定书签</div>'}</div></section>`;
   if (section === 'sync') content = `<section class="settings-section"><h2>同步</h2><p class="description">选择已由 iCloud Drive、网盘或其他服务同步的文件夹。书签与空间按记录合并，每台设备独立写入快照，删除记录也会同步。</p><div class="setting-row"><span>同步文件夹<small>${esc(state.settings.syncFolder || '尚未连接')}</small></span>${state.settings.syncFolder ? button('断开', 'disconnect-sync') : button('选择文件夹', 'connect-sync', 'button primary')}</div><div class="setting-row"><span>书签与空间<small>${esc(state.settings.syncStatus || '尚未同步')}</small></span>${button('立即同步书签', 'sync-now')}</div><h3>加密密码同步</h3><p class="description">使用相同的同步口令连接其他 Mac。整个密码库经过 scrypt 和 AES-256-GCM 加密，口令不写入磁盘。解锁保持 15 分钟，明文操作仍需要系统认证。</p>${state.passwordSyncUnlocked ? '<div class="actions">' + button('立即同步密码', 'password-sync-now', 'button primary') + button('锁定同步', 'password-sync-lock') + '</div>' : '<form id="password-sync-form"><label class="field-label">同步口令（至少 12 个字符）</label><input name="passphrase" type="password" class="field" autocomplete="off" minlength="12" maxlength="1024" required><div class="actions">' + button('创建或解锁并同步', 'password-sync-submit', 'button primary') + '</div></form>'}<p class="description">密码同步文件包含加密数据；书签文件包含明文网址。本功能使用你自己的同步文件夹，不是 Google Chrome 账号同步或原生 iCloud Keychain。首次连接另一台设备前，请等待网盘文件同步完成。</p></section>`;
   if (section === 'privacy') content = `<section class="settings-section"><h2>隐私与安全</h2><p class="description">网页与浏览器界面相互隔离。网站权限分别询问，打开外部应用前需要你确认。</p><div class="setting-row"><span>密码存储<small>密码库在本机加密，密钥由 macOS 钥匙串保护；明文操作要求系统认证</small></span>${button('管理密码', 'passwords')}</div><div class="setting-row"><span>iCloud Keychain<small>当前构建未配置受支持的 Apple Developer 签名与同步 entitlement，原生同步不可用，请使用同步页的加密密码同步，绝不声称已启用云同步</small></span><span class="pill">本地</span></div><div class="setting-row"><span>无痕窗口<small>使用独立内存会话，不写历史、密码或会话文件</small></span>${button('新建无痕窗口', 'private-window')}</div><h3>跟踪器规则覆盖</h3><p class="description">当前仅拦截内置 16 个常见跟踪服务域名及其子域名的非主文档网络请求。这不是 EasyList，不声称具有上游约 130,000 条规则，也不替代完整内容拦截器。</p></section>`;
-  if (section === 'extensions') content = `<section class="settings-section"><h2>扩展</h2><p class="description">从 Chrome 应用商店安装：粘贴商店链接或 32 位扩展 ID。也可以选择本地解压目录（开发者模式）。</p><div class="form-row"><input id="store-input" class="field" placeholder="https://chromewebstore.google.com/detail/… 或 32 位扩展 ID" maxlength="500" autocomplete="off"><button class="button primary" data-action="install-store-input">从商店安装</button></div><div class="notice">安装通过 Google 官方更新接口下载 crx，在本机解包后加载，Arco 不校验扩展签名。商店页面自带的“添加至 Chrome”按钮在 Arco 中无效，请用上面的输入框、地址栏右侧的安装按钮，或商店页面顶部的 Arco 安装栏。部分扩展依赖 Electron 未实现的 API（右键菜单、通知、webNavigation 等），功能可能残缺。</div><div class="actions" style="justify-content:flex-start">${button('选择解压扩展目录', 'add-extension')}</div><div id="extension-list" class="list"><div class="empty">正在读取扩展…</div></div></section>`;
+  if (section === 'extensions') content = `<section class="settings-section"><h2>扩展</h2><p class="description">从 Chrome 应用商店安装：粘贴商店链接或 32 位扩展 ID。也可以选择本地解压目录（开发者模式）。</p><div class="form-row"><input id="store-input" class="field" placeholder="https://chromewebstore.google.com/detail/… 或 32 位扩展 ID" maxlength="500" autocomplete="off"><button class="button primary" data-action="install-store-input">从商店安装</button></div><div class="notice">安装通过 Google 官方更新接口下载 crx，在本机解包后加载，Arco 不校验扩展签名。商店页面自带的“添加至 Chrome”按钮在 Arco 中无效，请用上面的输入框、地址栏右侧的安装按钮，或商店页面顶部的 Arco 安装栏。部分扩展依赖 Electron 未实现的 API（右键菜单、通知、webNavigation 等），功能可能残缺。</div><div class="actions" style="justify-content:flex-start">${button('选择解压扩展目录', 'add-extension')}</div><h3>从 Chrome 迁移扩展</h3><p class="description">复制所选扩展并在 Arco 中安装，保留启用或停用状态。不会迁移扩展账号、API Key 或内部设置，部分 Chrome API 可能不兼容。</p><div id="chrome-extensions" class="list"></div><div id="extension-list" class="list"><div class="empty">正在读取扩展…</div></div></section>`;
   if (section === 'about') content = `<section class="settings-section"><h2>Arco</h2><div class="brand-mark" style="font-size:28px;justify-content:flex-start;margin:20px 0"><span class="arc-symbol" style="width:28px;height:24px"></span><span>Arco</span></div><p class="description">独立 Chromium 桌面浏览器 · Chromium ${esc(state.chromium)}<br>默认窗口 1280 × 820 · 空间、收藏与本地密码</p><p class="description">界面设计参考 Zigzag 的 Arc 风格侧栏及 Apache-2.0 许可实现。Arco 使用自己的名称、A/arc 图标和 wordmark，不隶属于 Arc、Zigzag 或 The Browser Company。</p><p class="description">数据目录：${esc(state.settings.dataDirectory || ' ~/Library/Application Support/Arco')}<br>本地数据使用原子写入；损坏文件会保留备份。密码不会写入文件夹同步或日志。</p><p class="description">详细功能差异、签名与同步说明请查看项目 README 和 NOTICE。</p><div class="actions" style="justify-content:flex-start">${button('重新查看欢迎引导', 'welcome-tour')}</div></section>`;
   return `<div class="settings-layout">${nav}<div>${content}</div></div>`;
 }
@@ -187,7 +187,7 @@ function extensionsHTML(list) {
   return list.length ? list.map(e => `<div class="list-row">${extensionIconHTML(e)}<div class="grow"><strong>${esc(e.name || e.id)}</strong><small>${e.version ? 'v' + esc(e.version) + ' · ' : ''}${e.enabled ? '已启用' : '已停用'}</small></div><button class="switch ${e.enabled ? 'on' : ''}" data-extension-toggle="${attr(e.id)}" role="switch" aria-checked="${e.enabled}" aria-label="启用或停用 ${attr(e.name || e.id)}"></button><button class="icon" data-remove-extension="${attr(e.id)}" title="移除">${icon('trash')}</button></div>`).join('') : '<div class="empty">还没有安装扩展</div>';
 }
 function extensionIconHTML(e) { return e.icon && /^data:image\//.test(e.icon) ? `<img class="extension-icon" src="${attr(e.icon)}" alt="">` : icon('tabs'); }
-async function loadExtensions() { const node = $('#extension-list'); if (!node) return; const list = await call('extension-list'); if (list && $('#extension-list')) $('#extension-list').innerHTML = extensionsHTML(list); }
+async function loadExtensions() { const node = $('#extension-list'); if (!node) return; const list = await call('extension-list'); if (list && $('#extension-list')) $('#extension-list').innerHTML = extensionsHTML(list); await loadChromeExtensions(); }
 async function loadExtensionPanel() {
   const list = await call('extension-list');
   if (!list || !$('#extensions-body')) return;
@@ -214,9 +214,22 @@ async function loadBrowserSources(selector = '#browser-sources') {
   }).join('') : '<div class="empty">没有检测到已安装的浏览器。可以在浏览器里导出书签文件，再用「选择文件导入」。</div>';
   node.innerHTML = rows + '<div class="actions" style="justify-content:flex-start"><button class="text-button muted" data-action="refresh-browsers">重新检测</button></div>';
 }
-const ONBOARD_STEPS = ['hello', 'bring', 'sites', 'ads', 'ready'];
+const chromeMigrationResults = new Map(), chromeMigrationPending = new Set();
+async function loadChromeExtensions() {
+  const node = $('#chrome-extensions'); if (!node) return;
+  node.textContent = '正在检测 Chrome 扩展…';
+  const profiles = await call('chrome-extensions');
+  if (!node.isConnected) return;
+  if (!profiles) { node.textContent = '检测失败，请重新检测。'; return; }
+  node.innerHTML = profiles.length ? profiles.map(profile => `<div data-chrome-profile="${attr(profile.id)}"><h3>Chrome · ${esc(profile.label)}</h3>${profile.note ? `<p class="description">${esc(profile.note)}</p>` : profile.extensions.length ? profile.extensions.map(item => {
+    const installed = (state.settings.extensions || []).some(record => record.storeID === item.id);
+    return `<div class="list-row"><label class="grow"><input type="checkbox" data-chrome-extension="${attr(item.id)}" ${item.error || installed ? 'disabled' : item.enabled ? 'checked' : ''}> <strong>${esc(item.name)}</strong><small>${esc(item.error || (installed ? '已在 Arco 安装' : `v${item.version} · ${item.enabled ? '已启用' : '已停用'}`))}</small>${!item.error ? `<details><summary>查看权限</summary><small>${esc(item.permissions.join('、') || '无额外权限')}</small></details>` : ''}</label></div>`;
+  }).join('') + `<button class="button" data-import-chrome="${attr(profile.id)}" ${chromeMigrationPending.has(profile.id) ? 'disabled' : ''}>${chromeMigrationPending.has(profile.id) ? '正在迁移…' : '迁移所选扩展'}</button><p class="description" data-chrome-result role="status">${esc(chromeMigrationResults.get(profile.id) || '')}</p>` : '<p class="description">没有检测到可迁移的扩展。</p>'}</div>`).join('') : '<p class="description">没有检测到本机 Chrome 个人资料。</p>';
+  node.insertAdjacentHTML('beforeend', '<button class="text-button muted" data-action="refresh-chrome-extensions">重新检测</button>');
+}
+const ONBOARD_STEPS = ['hello', 'bring', 'extensions', 'sites', 'ads', 'ready'];
 const ONBOARD_SITES = [['Gmail', 'https://mail.google.com'], ['YouTube', 'https://www.youtube.com'], ['Notion', 'https://www.notion.so'], ['ChatGPT', 'https://chatgpt.com'], ['Claude', 'https://claude.ai'], ['GitHub', 'https://github.com'], ['X', 'https://x.com'], ['Figma', 'https://www.figma.com'], ['Bilibili', 'https://www.bilibili.com'], ['知乎', 'https://www.zhihu.com'], ['小红书', 'https://www.xiaohongshu.com'], ['Spotify', 'https://open.spotify.com']];
-const ONBOARD_TITLES = { bring: ['把书签带过来', '直接读取本机已安装浏览器的书签，导入到当前空间：保留文件夹层级，重复网址跳过。不读取密码、历史、Cookie 或登录状态。'], sites: ['固定常用网站', '选中的网站会变成侧栏顶部的常驻磁贴，点一下就打开。'], ads: ['拦截跟踪器？', 'Arco 内置拦截器，只挡内置清单里的跟踪服务域名，页面更快，也少被跟踪。'], ready: ['准备就绪', '选择界面外观，之后随时可以在设置里改。'] };
+const ONBOARD_TITLES = { extensions: ['把 Chrome 扩展带过来', '选择要迁移的扩展，复制到 Arco 并实际安装，保留启用或停用状态。不会迁移扩展账号、API Key 或内部设置；部分 Chrome API 可能不兼容。'], bring: ['把书签带过来', '直接读取本机已安装浏览器的书签，导入到当前空间：保留文件夹层级，重复网址跳过。不读取密码、历史、Cookie 或登录状态。'], sites: ['固定常用网站', '选中的网站会变成侧栏顶部的常驻磁贴，点一下就打开。'], ads: ['拦截跟踪器？', 'Arco 内置拦截器，只挡内置清单里的跟踪服务域名，页面更快，也少被跟踪。'], ready: ['准备就绪', '选择界面外观，之后随时可以在设置里改。'] };
 let onboardingStep = 0, onboardingShown = false;
 const pickedSites = new Map();
 function onboardingPanel() {
@@ -224,6 +237,7 @@ function onboardingPanel() {
   let body;
   if (step === 'hello') body = `<div class="onboard-hello"><div class="brand-mark"><span class="arc-symbol"></span><span>Arco</span></div><h2>给自己一点空间。</h2><p class="description">侧栏放你常用的网站，标签页按空间分组。先花一分钟把它调成你的样子。</p></div>`;
   else if (step === 'bring') body = `<p class="description">${ONBOARD_TITLES.bring[1]}</p><div class="list" id="onboard-sources"><div class="empty">正在检测浏览器…</div></div>`;
+  else if (step === 'extensions') body = `<p class="description">${ONBOARD_TITLES.extensions[1]}</p><div class="list" id="chrome-extensions"></div>`;
   else if (step === 'sites') body = `<p class="description">${ONBOARD_TITLES.sites[1]}</p><div class="onboard-sites">${ONBOARD_SITES.map(([name, url]) => `<button class="onboard-site ${pickedSites.has(url) ? 'picked' : ''}" data-onboard-site="${attr(url)}" aria-pressed="${pickedSites.has(url)}">${favicon({ favicon: new URL(url).origin + '/favicon.ico' })}<span>${esc(name)}</span></button>`).join('')}</div>`;
   else if (step === 'ads') body = `<p class="description">${ONBOARD_TITLES.ads[1]}</p><div class="setting-row"><span>拦截跟踪器<small>内置 16 个常见跟踪服务域名，只拦截非主文档请求</small></span><button class="switch ${state.settings.trackerBlocking ? 'on' : ''}" data-onboard-toggle="trackerBlocking" role="switch" aria-checked="${state.settings.trackerBlocking}"></button></div>`;
   else body = `<p class="description">${ONBOARD_TITLES.ready[1]}</p><label class="field-label" for="onboard-theme">界面外观</label><select class="field" id="onboard-theme"><option value="system" ${state.settings.theme === 'system' ? 'selected' : ''}>跟随系统</option><option value="light" ${state.settings.theme === 'light' ? 'selected' : ''}>浅色</option><option value="dark" ${state.settings.theme === 'dark' ? 'selected' : ''}>深色</option></select><div class="onboard-keys"><span><kbd>⌘T</kbd> 新标签页</span><span><kbd>⌘L</kbd> 地址栏</span><span><kbd>⌘F</kbd> 页内查找</span><span><kbd>⇧⌘T</kbd> 恢复标签</span><span><kbd>⌘,</kbd> 设置</span></div>`;
@@ -238,6 +252,7 @@ function showOnboarding(step = 0) {
   root.querySelector('[data-close-modal]')?.addEventListener('click', closeModal);
   requestAnimationFrame(() => (root.querySelector('.onboard-footer .button.primary') || root).focus());
   if (ONBOARD_STEPS[step] === 'bring') loadBrowserSources('#onboard-sources');
+  if (ONBOARD_STEPS[step] === 'extensions') loadChromeExtensions();
 }
 const actions = {
   'toggle-sidebar': () => call('toggle-sidebar'), back: () => call('back'), forward: () => call('forward'), reload: () => call(activeTab()?.loading ? 'stop' : 'reload'),
@@ -280,6 +295,7 @@ const actions = {
   'password-sync-lock': async () => { if(await call('password-sync-lock'))showModal('settings',{section:'sync'}); },
   'password-sync-now': async () => { if(await call('password-sync-now')){showModal('settings',{section:'sync'});toast('加密密码同步完成');} },
   'close-toast': () => { $('#toast').hidden = true; },
+  'refresh-chrome-extensions': () => loadChromeExtensions(),
   'refresh-browsers': () => loadBrowserSources(),
   'onboard-next': () => { if (onboardingStep >= ONBOARD_STEPS.length - 1) return closeModal(); showOnboarding(onboardingStep + 1); },
   'onboard-back': () => showOnboarding(Math.max(0, onboardingStep - 1)),
@@ -306,6 +322,20 @@ document.addEventListener('click', async event => {
   if (a.downloadOpen) return call('download-open', { id: a.downloadOpen });
   if (a.downloadReveal) return call('download-reveal', { id: a.downloadReveal });
   if (a.downloadCancel) return call('download-cancel', { id: a.downloadCancel });
+  if (a.importChrome) {
+    const group = el.closest('[data-chrome-profile]');
+    const ids = [...group.querySelectorAll('[data-chrome-extension]:checked:not(:disabled)')].map(input => input.dataset.chromeExtension);
+    if (!ids.length) return toast('请先选择要迁移的扩展');
+    chromeMigrationPending.add(a.importChrome);
+    el.disabled = true; el.textContent = '正在迁移…';
+    const results = await call('import-chrome-extensions', { profileID: a.importChrome, ids });
+    chromeMigrationPending.delete(a.importChrome);
+    chromeMigrationResults.set(a.importChrome, results ? results.map(item => `${item.name}：${item.error || (item.already ? '已安装，已跳过' : item.enabled ? '已安装并启用' : '已安装，保持停用')}`).join('；') : '迁移未完成，请重试。');
+    await loadChromeExtensions();
+    const list = await call('extension-list');
+    if (list && $('#extension-list')) $('#extension-list').innerHTML = extensionsHTML(list);
+    return;
+  }
   if (a.importBrowser) {
     const count = await call('import-browser', { id: a.importBrowser });
     const source = browserSources.find(s => s.id === a.importBrowser);

@@ -29,14 +29,14 @@ open dist/mac-arm64/Arco.app
 ## 已实现
 
 - Arc 风格彩色窗口、默认 240px 可调整侧栏、30px 标签行、默认三列的常驻网站网格（直接添加或拖入标签、跨空间共享）、嵌套书签文件夹、Spaces、浅色/深色外观及自定义空间颜色。
-- 首次启动欢迎引导（复刻 Zigzag）：欢迎页 → 从浏览器导入书签 → 选常用网站做常驻磁贴 → 拦截器开关 → 外观与快捷键，完成或关闭即不再打扰；设置 → 关于可重新查看。
+- 首次启动欢迎引导（复刻 Zigzag）：欢迎页 → 从浏览器导入书签 → 从 Chrome 选择迁移扩展 → 选常用网站做常驻磁贴 → 拦截器开关 → 外观与快捷键，完成或关闭即不再打扰；设置 → 关于可重新查看。
 - Chromium 网页、地址/搜索命令栏、前进/后退/刷新、标签关闭/恢复、静音、标签排序和移到空间；固定书签的打开、编辑、排序、移动和删除。
 - 真实双网页分屏、分屏比例调整、Shift 点击链接 Peek、全部标签页视图、页内查找、历史、下载进度和文件操作；带窗口尺寸的 `window.open` 创建独立窗口；无尺寸、先开空白页再跳转以及 iframe 发起的新标签页通过 Electron `createWindow` 接管原生子 WebContents，保留 `window.opener`、回传消息与自行关闭的能力。
 - 密码保存确认、精确来源的显式填充、强密码生成、CSV 导入/导出；显示、复制和填充通过系统认证解锁。
 - 书签导入：直接读取本机 Chrome、Edge、Brave、Vivaldi、Opera、Dia、Firefox、Safari、Arc 的书签文件（Chrome 开启账号书签同步时读 `AccountBookmarks`；Safari 与 Chromium 系数据需授予完全磁盘访问权限），也可导入 HTML、Chromium Bookmarks JSON、Arc StorableSidebar JSON 文件；HTML 导出保留空间与文件夹路径。
 - 阅读视图（Mozilla Readability）、打印、保存 PDF、网页可视区域截图、Chromium 自带 PDF 查看和开发者工具。
 - 每个无痕窗口使用独立内存会话；不写浏览历史、标签会话或密码，也不复用后来新开的无痕窗口的 Cookie。
-- 扩展：从 Chrome 应用商店按链接或扩展 ID 安装（走 Google 官方更新接口下载 crx、本机解包后加载），商店页面顶部会注入 Arco 自己的安装栏，地址栏右侧也有安装按钮；工具栏的扩展入口显示图标、版本与启用状态，可停用、启用或移除（停用只卸载，文件仍在）；通过 [electron-chrome-extensions](https://github.com/samuelmaddock/electron-browser-shell) 补齐 Electron 缺失的扩展 API：工具栏图标列表、`chrome.action`/`onClicked`、`chrome.tabs`、`chrome.windows`、`chrome.contextMenus`、`chrome.notifications` 等。点图标即按扩展自己的逻辑执行——声明了 `default_popup` 的弹出它自己的界面，没声明的触发它的 `onClicked`（例如 JSON-handle 会自己 `chrome.windows.create` 开窗口）。仍可加载本地解压扩展。
+- 扩展：从 Chrome 应用商店按链接或扩展 ID 安装（走 Google 官方更新接口下载 crx、本机解包后加载），商店页面顶部会注入 Arco 自己的安装栏，地址栏右侧也有安装按钮；工具栏的扩展入口显示图标、版本与启用状态，可停用、启用或移除（停用只卸载，文件仍在）；通过 [electron-chrome-extensions](https://github.com/samuelmaddock/electron-browser-shell) 补齐 Electron 缺失的扩展 API：工具栏图标列表、`chrome.action`/`onClicked`、`chrome.tabs`、`chrome.windows`、`chrome.contextMenus`、`chrome.notifications` 等。点图标即按扩展自己的逻辑执行——声明了 `default_popup` 的弹出它自己的界面，没声明的触发它的 `onClicked`（例如 JSON-handle 会自己 `chrome.windows.create` 开窗口）。仍可加载本地解压扩展。首次引导和设置 → 扩展可按 Chrome 个人资料选择迁移：复制扩展文件到 Arco、实际加载并保存，保留启用或停用状态；逐项报告失败，已有扩展跳过。不会迁移扩展内部设置、API Key 或账号，也不持续跟随 Chrome 更新。
 
 常驻区始终显示“＋ 添加”，可填写名称和网址，也可把标签或固定书签拖到常驻区。常驻磁贴使用实际网站图标，点按会优先切换到当前空间里已打开的同一网页。悬停或键盘聚焦磁贴后，可以使用移除按钮。
 
@@ -80,7 +80,7 @@ open dist/mac-arm64/Arco.app
 
 ## 当前验收状态
 
-已通过 33 项基础、同步、浏览器书签与扩展包测试、16 项端到端检查，包括无尺寸、空白页跳转、iframe 登录标签的 opener 回传与自动关闭、首启引导走完五步且重启后不再弹出、从商店链接安装扩展并拒绝非商店链接、点扩展图标触发它自己的 `onClicked` 并由扩展自己开窗口、认证等待期间切换标签、无痕窗口隔离、关闭后恢复标签、损坏文件保护和同一进程重新打开窗口时的恢复失败保护。打包应用的真实网页、书签、命令栏和认证辅助程序也有独立检查。
+已通过 36 项基础、同步、浏览器书签与扩展包测试、16 项端到端检查，包括无尺寸、空白页跳转、iframe 登录标签的 opener 回传与自动关闭、首启引导走完六页且重启后不再弹出、从 Chrome 迁移扩展后实际注入网页（删除源扩展目录并重启后仍生效，保留停用状态，失败逐项报告，移除后可重新迁移）、从商店链接安装扩展并拒绝非商店链接、点扩展图标触发它自己的 `onClicked` 并由扩展自己开窗口、认证等待期间切换标签、无痕窗口隔离、关闭后恢复标签、损坏文件保护和同一进程重新打开窗口时的恢复失败保护。打包应用的真实网页、书签、命令栏和认证辅助程序也有独立检查。
 
 这是开发预览版，最终独立安全复审尚未完成。本机加密密码库及重启读取已有验证；重新签名后的钥匙串访问需要使用者本人授权，Touch ID 的实际批准流程和两台 Mac 之间的 iCloud 文件传输仍需人工验收。
 
@@ -95,7 +95,7 @@ open dist/mac-arm64/Arco.app
 | 扩展 | 可从商店按链接/ID 安装（商店自带的“添加至 Chrome”按钮在 Electron 中无效，改用注入的安装栏或地址栏安装按钮），安装前显示扩展请求的权限；通过兼容层支持工具栏图标、`chrome.action`、`chrome.tabs`、`chrome.windows`、右键菜单等；不校验 crx 签名；`chrome.runtime.connectNative`/`sendNativeMessage` 被拒绝（不启动本机原生应用）；`chrome.permissions.request` 一律拒绝；无 Chrome 账号同步、无扩展自动更新、无通用 1Password 桌面原生桥接 |
 | 拦截规则 | 仅内置 16 个常见跟踪服务域名后缀，非主文档请求；不是原版约 13 万条 EasyList 内容规则 |
 | Arc 导入 | 读取经典容器及 sidebarSyncState/firebaseSyncState 中的空间、固定页、文件夹、收藏和颜色；不导入登录 Cookie 或 SQLite 历史 |
-| 其他浏览器导入 | 直接读取 Chrome、Edge、Brave、Vivaldi、Opera、Dia、Firefox、Safari、Arc 的书签文件，导入到当前空间（Safari 需完全磁盘访问权限，否则在 Safari 中导出书签文件）；不迁移密码、历史、Cookie、登录状态和扩展 |
+| 其他浏览器导入 | 直接读取 Chrome、Edge、Brave、Vivaldi、Opera、Dia、Firefox、Safari、Arc 的书签文件，导入到当前空间（Safari 需完全磁盘访问权限，否则在 Safari 中导出书签文件）；不迁移密码、历史、Cookie 和登录状态；Chrome 扩展可在首次引导或设置 → 扩展中单独选择迁移，复制后实际加载，不含内部设置与账号 |
 | Passkeys | Electron 45.2.3 提供 `app.configureWebAuthn()`，当前 Arco 尚未配置平台认证器。隔离实测：未配置时平台请求持续等待；开启 `platformPasskeys` 后，当前签名/关联域条件下请求以 `ASAuthorizationError 1004` 失败。该原生接入要求应用标识、签名与配置文件，以及依赖方域名的 webcredentials/AASA 关联；仅加 feature 开关或给 App 重签名不能保证 Google 通行密钥可用。尚未完成真实 Google 通行密钥登录验收，可在 Google 页面选择其他验证方式 |
 | 翻译、画中画、网页通知深度集成 | 没有保证与原版对等，需分别补充实现和站点验证 |
 | DRM、Google 登录和 Chrome Sync | 不附带 Google 私有服务、Chrome 账号同步或 Widevine 授权；网站兼容性需实测 |
