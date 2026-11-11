@@ -13,4 +13,4 @@
 
 .address-row{display:flex;align-items:center;gap:2px;margin:0 6px}.address-row .domain-field{margin:0;flex:1;min-width:0}.extensions-entry{width:26px;height:26px;min-height:26px;flex:none;color:var(--muted)}.extensions-entry:hover{color:var(--ink)}
 
-browser-action-list{display:flex;align-items:center;gap:8px;margin:12px 0 14px;min-height:36px}browser-action-list::part(action){width:34px;height:34px;border-radius:9px;background:var(--field);border:0;padding:6px}browser-action-list::part(action):hover{background:var(--hover)}browser-action-list::part(action) img{width:20px;height:20px;object-fit:contain}
+browser-action-list{display:flex;align-items:center;gap:8px;margin:12px 0 14px;min-height:36px}browser-action-list::part(action){width:34px;height:34px;border-radius:9px;background-color:var(--field);border:0;padding:6px}browser-action-list::part(action):hover{background-color:var(--hover)}browser-action-list::part(action) img{width:20px;height:20px;object-fit:contain}

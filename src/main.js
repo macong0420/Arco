@@ -119,12 +119,12 @@ function createWindow(isPrivate = false) {
 }
 function createTab(win, rawURL, options = {}) {
   if (!win || win.isDestroyed() || (!win.private && !library.space(options.spaceID || win.spaceID))) error('空间不存在');
-  const url = rawURL && rawURL !== 'about:blank' ? (options.extensionPage ? extensionHost.url(rawURL) : core.webURL(rawURL)) : '';
+  const url = rawURL && rawURL !== 'about:blank' ? (options.extensionPage ? extensionHost.url(rawURL, options.extensionID) : core.webURL(rawURL)) : '';
   const id = options.id || core.id(), spaceID = win.private ? win.spaceID : options.spaceID || win.spaceID;
   // Adopt Chromium's child WebContents so window.open keeps its opener, WindowProxy and POST body.
   const view = options.webContents ? new WebContentsView({ webContents: options.webContents }) : new WebContentsView({ webPreferences: { partition: win.partition, preload: path.join(__dirname, 'page-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, safeDialogs: true } });
   const tab = { id, spaceID, url, title: options.title || (url ? new URL(url).hostname : '新标签页'), favicon: '', pinned: !!options.pinned, view, window: win };
-  win.tabs.set(id, tab); attachTab(tab);
+  win.tabs.set(id, tab); attachTab(tab, options.extensionID || '');
   if (!win.private) extensionHost.track(view.webContents, win);
   if (options.webContents) view.webContents.once('close', () => { if (!win.isDestroyed()) closeTab(win, id); });
   else if (url) view.webContents.loadURL(url).catch(() => {});
@@ -136,17 +136,29 @@ function popupSize(features) {
   const size = key => { const match = String(features || '').match(new RegExp(`${key}=(\\d+)`)); return match ? Number(match[1]) : 0; };
   return { width: Math.max(320, Math.min(1200, size('width') || 520)), height: Math.max(240, Math.min(1000, size('height') || 640)) };
 }
-function attachTab(tab) {
+function attachTab(tab, initialExtensionID = '') {
   const wc = tab.view.webContents, win = tab.window;
+  const ownerID = () => {
+    if (win.private) return '';
+    const source = new URL(wc.getURL() || 'about:blank');
+    return source.protocol === 'chrome-extension:' ? source.hostname : source.href === 'about:blank' ? initialExtensionID : '';
+  };
   wc.setWindowOpenHandler(details => {
-    if (!isHTTP(details.url) && details.url !== 'about:blank') { try { if (ALLOWED_EXTERNAL.has(new URL(details.url).protocol)) confirmExternal(win, details.url); } catch {} return { action: 'deny' }; }
+    const extensionID = ownerID();
+    if (!isHTTP(details.url) && details.url !== 'about:blank') {
+      try { if (!extensionID) throw new Error(); extensionHost.url(details.url, extensionID); }
+      catch { try { if (ALLOWED_EXTERNAL.has(new URL(details.url).protocol)) confirmExternal(win, details.url); } catch {} return { action: 'deny' }; }
+    }
     const response = { action: 'allow', overrideBrowserWindowOptions: { ...popupSize(details.features), titleBarStyle: 'default', autoHideMenuBar: true, minimizable: false, maximizable: false, fullscreenable: false, webPreferences: { session: session.fromPartition(win.partition), preload: path.join(__dirname, 'page-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } } };
-    if (details.disposition !== 'new-window') response.createWindow = options => createTab(win, details.url, { webContents: options.webContents, select: details.disposition !== 'background-tab' }).view.webContents;
+    if (details.disposition !== 'new-window') response.createWindow = options => createTab(win, details.url, { webContents: options.webContents, extensionPage: !!extensionID, extensionID, select: details.disposition !== 'background-tab' }).view.webContents;
     return response;
   });
-  wc.on('did-create-window', child => { child.setMenu(null); });
+  wc.on('did-create-window', child => { child.setMenu(null); if (ownerID()) attachExtensionWindow(child, ownerID()); });
   const guardNavigation = (event, url) => {
-    if (!isHTTP(url)) { event.preventDefault(); try { if (ALLOWED_EXTERNAL.has(new URL(url).protocol)) confirmExternal(win, url); } catch {} }
+    if (!isHTTP(url)) {
+      try { if (ownerID()) { extensionHost.url(url, ownerID()); return; } } catch {}
+      event.preventDefault(); try { if (ALLOWED_EXTERNAL.has(new URL(url).protocol)) confirmExternal(win, url); } catch {}
+    }
   };
   wc.on('will-navigate', guardNavigation); wc.on('will-redirect', guardNavigation);
   // 商店安装栏的哨兵地址：只有当前页面确实是同一个扩展的商店详情页时才接受。
@@ -200,20 +212,31 @@ function extensionBrowser(windowID) {
   return ordinary.find(win => win.id === windowID) || ordinary.find(win => win.isFocused()) || ordinary[0] || createWindow(false);
 }
 function createExtensionTab(details) {
-  const extensionID = details.__arcoExtensionID || '';
+  // Options pages also reach this trusted adapter internally, without the router's owner tag.
+  const target = new URL(details.url || 'about:blank');
+  const extensionID = details.__arcoExtensionID || (target.protocol === 'chrome-extension:' ? target.hostname : '');
   const url = extensionHost.url(details.url || 'about:blank', extensionID);
   const win = extensionBrowser(details.windowId);
   const tab = createTab(win, url, { extensionPage: true, extensionID, select: details.active !== false });
+  if (details.active !== false) { win.shell.webContents.send('arco:command', 'close-modal'); win.focus(); }
   return [tab.view.webContents, win];
 }
-function attachExtensionWindow(child, extensionID) {
+function attachExtensionWindow(child, extensionID, track = true) {
   const wc = child.webContents, ses = session.fromPartition(normalSession);
-  extensionHost.track(wc, child); extensionHost.ownWindow(child, extensionID);
+  if (track) extensionHost.track(wc, child);
+  extensionHost.ownWindow(child, extensionID);
   const guard = (event, url) => { try { extensionHost.url(url, extensionID); } catch { event.preventDefault(); } };
   wc.on('will-navigate', guard); wc.on('will-redirect', guard);
   wc.setWindowOpenHandler(details => {
     try { extensionHost.url(details.url, extensionID); } catch { return { action: 'deny' }; }
-    return { action: 'allow', overrideBrowserWindowOptions: { ...popupSize(details.features), webPreferences: { session: ses, contextIsolation: true, nodeIntegration: false, sandbox: true } } };
+    const response = { action: 'allow', overrideBrowserWindowOptions: { ...popupSize(details.features), webPreferences: { session: ses, contextIsolation: true, nodeIntegration: false, sandbox: true } } };
+    if (details.disposition !== 'new-window') response.createWindow = options => {
+      const win = extensionBrowser();
+      const tab = createTab(win, details.url, { webContents: options.webContents, extensionPage: true, extensionID, select: details.disposition !== 'background-tab' });
+      if (details.disposition !== 'background-tab') { win.shell.webContents.send('arco:command', 'close-modal'); setImmediate(() => { if (!win.isDestroyed()) win.focus(); }); }
+      return tab.view.webContents;
+    };
+    return response;
   });
   wc.on('did-create-window', nested => attachExtensionWindow(nested, extensionID));
 }
@@ -613,6 +636,7 @@ app.whenReady().then(async () => {
   extensionHost = createExtensionHost({
     userData, ses: session.fromPartition(normalSession),
     isShell(event) { try { return !trustedWindow(event).private; } catch { return false; } },
+    attachWindow: attachExtensionWindow,
     createTab: createExtensionTab,
     createWindow: createExtensionWindow,
     selectTab(wc, owner) {

@@ -12,7 +12,7 @@ function extensionURL(value, ses, ownerID = '') {
   throw new Error('扩展只能打开网页或自己的页面');
 }
 
-function createExtensionHost({ userData, ses, isShell, ...impl }) {
+function createExtensionHost({ userData, ses, isShell, attachWindow, ...impl }) {
   const bridge = new ElectronChromeExtensions({ ...impl, session: ses, requestPermissions: async () => false });
   const router = bridge.ctx.router, dispatch = router.onExtensionMessage.bind(router);
   const wake = async extensionID => {
@@ -66,7 +66,7 @@ function createExtensionHost({ userData, ses, isShell, ...impl }) {
     ownedWindows.set(window, extensionID);
     window.once('closed', () => ownedWindows.delete(window));
   };
-  bridge.on('browser-action-popup-created', popup => ownWindow(popup.browserWindow, popup.extensionId));
+  bridge.on('browser-action-popup-created', popup => attachWindow(popup.browserWindow, popup.extensionId, false));
   ses.extensions.on('extension-unloaded', (_event, extension) => {
     for (const [window, id] of ownedWindows) if (id === extension.id && !window.isDestroyed()) window.close();
   });
