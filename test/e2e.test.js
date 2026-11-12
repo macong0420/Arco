@@ -716,7 +716,9 @@ test('a Chrome Web Store package installs through the settings UI',{timeout:6000
     const restartedList=await page.evaluate(()=>window.arco.invoke('arco:invoke',{channel:'extension-list'}));
     assert.equal(restartedList.find(item=>item.id===storeID)?.enabled,true);
     await page.evaluate(o=>window.arco.invoke('arco:invoke',{channel:'new-tab',payload:{url:o}}),pageOrigin+'/page');
-    const restored=(await instance.windows()).find(w=>w.url()===pageOrigin+'/page');
+    // 恢复的标签页首次显示才加载，新标签页要等它的渲染进程就绪，不能一次查找就断言。
+    let restored;
+    await assertEventually(async()=>{restored=(await instance.windows()).find(w=>w.url()===pageOrigin+'/page');return !!restored;});
     await restored.waitForFunction(()=>!!document.documentElement.dataset.arcoStore);
     assert.equal(await restored.evaluate(()=>document.documentElement.dataset.arcoStore),storeID,'chrome.runtime.id must stay the requested store id after restart');
   } finally {
