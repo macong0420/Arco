@@ -1,5 +1,5 @@
 'use strict';
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, contextBridge } = require('electron');
 // Isolated world: page scripts cannot see or call this IPC bridge.
 const visible = element => {
   if (!element || element.type === 'hidden' || element.disabled || element.readOnly) return false;
@@ -22,7 +22,7 @@ document.addEventListener('submit', event => { if (event.isTrusted) capture(even
 document.addEventListener('click', event => {
   if (!event.isTrusted) return;
   const link = event.target.closest?.('a[href]');
-  if (event.shiftKey && link && /^https?:/.test(link.href)) { event.preventDefault(); event.stopImmediatePropagation(); ipcRenderer.send('arco:page-peek', { url: link.href }); return; }
+  if (event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && link && /^https?:/.test(link.href)) { event.preventDefault(); event.stopImmediatePropagation(); ipcRenderer.send('arco:page-peek', { url: link.href }); return; }
   const button = event.target.closest?.('button[type="submit"],input[type="submit"]');
   if (button) capture(button.form);
 }, true);
@@ -31,4 +31,52 @@ document.addEventListener('drop', event => {
   if (!event.isTrusted) return;
   const id = event.dataTransfer.getData('application/x-arco-tab');
   if (id) { event.preventDefault(); ipcRenderer.send('arco:page-split', { id }); }
+});
+
+// 标准 publicKey create/get 仍交给 Chromium 做原生校验和认证器选择：页面世界里只叠加一个可取消的
+// AbortController（保留调用方自己的 signal 与 abort reason），并把“等待/结束”状态用无凭据的
+// DOM 事件交给隔离世界。challenge、credential、assertion 与密钥材料从不跨到壳层。
+const passkeyBridge = () => {
+  const credentials = navigator.credentials;
+  if (!credentials || credentials.__arcoPasskeyBridge) return;
+  const controllers = new Map();
+  const announce = (name, id, conditional = false) => { try { window.dispatchEvent(new CustomEvent(name, { detail: { id, conditional } })); } catch {} };
+  window.addEventListener('arco-passkey-cancel', event => {
+    const id = event.detail?.id;
+    const controller = typeof id === 'string' ? controllers.get(id) : null;
+    if (controller) controller.abort();
+  });
+  for (const name of ['create', 'get']) {
+    const original = credentials[name];
+    if (typeof original !== 'function') continue;
+    const wrapped = function (options) {
+      if (!options || !options.publicKey) return Reflect.apply(original, this, [options]);
+      const conditional = name === 'get' && options.mediation === 'conditional';
+      // Conditional mediation is passive and may live for the whole document. It must not show a blocking wait UI.
+      if (conditional) return Reflect.apply(original, this, [options]);
+      const controller = new AbortController();
+      const id = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+      const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+      // WebIDL dictionary members may be inherited or non-enumerable. Inherit from the exact caller object and
+      // override only signal; Object.assign/spread would silently drop those members.
+      const next = Object.create(options);
+      Object.defineProperty(next, 'signal', { value: signal, configurable: true });
+      controllers.set(id, controller);
+      announce('arco-passkey-pending', id, false);
+      let pending;
+      try { pending = Reflect.apply(original, this, [next]); }
+      catch (error) { controllers.delete(id); announce('arco-passkey-settled', id); throw error; }
+      return Promise.resolve(pending).finally(() => { controllers.delete(id); announce('arco-passkey-settled', id); });
+    };
+    try { credentials[name] = wrapped; } catch { try { Object.defineProperty(credentials, name, { value: wrapped, configurable: true }); } catch {} }
+  }
+  Object.defineProperty(credentials, '__arcoPasskeyBridge', { value: true });
+};
+// 同步在页面世界安装：早于页面自己的脚本，且不向页面暴露任何 IPC。
+try { contextBridge.executeInMainWorld({ func: passkeyBridge }); } catch {}
+window.addEventListener('arco-passkey-pending', event => { const id = event.detail?.id; if (typeof id === 'string' && id && id.length <= 128) ipcRenderer.send('arco:passkey-pending', { id, conditional: event.detail?.conditional === true }); });
+window.addEventListener('arco-passkey-settled', event => { const id = event.detail?.id; if (typeof id === 'string' && id && id.length <= 128) ipcRenderer.send('arco:passkey-settled', { id }); });
+ipcRenderer.on('arco:passkey-cancel', (_event, payload) => {
+  const id = payload?.id;
+  if (typeof id === 'string' && id && id.length <= 128) window.dispatchEvent(new CustomEvent('arco-passkey-cancel', { detail: { id } }));
 });

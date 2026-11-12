@@ -2,7 +2,7 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const api = window.arco;
-let state = null, modal = '', selectedSuggestion = 0, lastItems = [], toastTimer, browserSources = [];
+let state = null, modal = '', selectedSuggestion = 0, lastItems = [], toastTimer, browserSources = [], authRequestID = '';
 const COLORS = { sky: '#d9e6f7', lavender: '#e5ddf3', rose: '#f2dce4', peach: '#f5e1d5', sand: '#eee6d4', sage: '#e0e6d9', mint: '#d8ebe2', white: '#efefef', graphite: '#555965' };
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const attr = esc;
@@ -12,6 +12,20 @@ const favicon = (item, fallback = 'globe') => item.favicon && /^https?:\/\//.tes
 document.addEventListener('error', event => { const img=event.target; if(img instanceof HTMLImageElement && img.hasAttribute('data-favicon')) { const holder=document.createElement('span');holder.innerHTML=icon('globe');img.replaceWith(holder.firstElementChild); } },true);
 const hostname = url => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return '新标签页'; } };
 const activeTab = () => state?.tabs.find(t => t.id === state.activeID);
+function currentSiteHost() {
+  const focused = state?.tabs.find(t => t.id === state.focusedPaneID);
+  for (const value of [state?.peek?.url, focused?.url, activeTab()?.url]) {
+    try { const url = new URL(value); if (url.protocol === 'https:' || url.protocol === 'http:') return url.host; } catch {}
+  }
+  return '';
+}
+function systemPasswordsHTML() {
+  const host = currentSiteHost();
+  return `<div class="notice"><strong>Apple“密码”</strong><p>打开后搜索网站，解锁并复制普通密码或验证码，再回网页粘贴。通行密钥不能复制。${host ? `<br>当前网页：<strong>${esc(host)}</strong>` : ''}</p><button class="button" data-action="open-system-passwords">打开 Apple“密码”</button></div>`;
+}
+// 页面命令目标与主进程 commandTarget 一致：Peek → 阅读视图 → 聚焦窗格。
+const commandTab = () => state?.tabs.find(t => t.id === state.focusedPaneID) || activeTab();
+const commandLoading = () => state?.peek ? !!state.peek.loading : state?.reader ? false : !!commandTab()?.loading;
 const space = () => state?.spaces.find(s => s.id === state.activeSpaceID);
 async function call(channel, payload = {}, showErrors = true) {
   try { return await api.invoke('arco:invoke', { channel, payload }); }
@@ -36,7 +50,7 @@ function render() {
   $('#security-icon').innerHTML = icon(insecure ? 'warning' : tab?.url?.startsWith('https:') ? 'lock' : 'globe');
   $('#security-icon').title = insecure ? '此连接不安全' : tab?.url?.startsWith('https:') ? 'HTTPS 连接' : '';
   $$('[data-action="back"]').forEach(button=>{button.disabled=!tab?.canBack;}); $$('[data-action="forward"]').forEach(button=>{button.disabled=!tab?.canForward;});
-  $$('[data-action="reload"]').forEach(button=>{button.title=tab?.loading?'停止加载':'重新加载';button.innerHTML=icon(tab?.loading?'close':'reload');});
+  $$('[data-action="reload"]').forEach(button=>{const loading=commandLoading();button.title=loading?'停止加载':'重新加载';button.innerHTML=icon(loading?'close':'reload');});
   $('#space-name').textContent = state.private ? '无痕窗口' : currentSpace?.name || '个人';
   $('#space-heading').setAttribute('aria-label',state.private?'无痕窗口':'编辑空间：'+(currentSpace?.name||'个人'));
   renderFavorites(); renderPinned(); renderTabs(); renderSpaces();
@@ -54,9 +68,18 @@ function render() {
   if (state.warning) { toast(state.warning); state.warning = ''; }
   if (state.capture && modal !== 'capture') showModal('capture');
   if (!state.capture && modal === 'capture') closeModal();
+  if (state.httpAuth && (modal !== 'http-auth' || authRequestID !== state.httpAuth.id)) showModal('http-auth');
+  if (!state.httpAuth && modal === 'http-auth') closeModal();
+  if (modal === 'find') {
+    const count = $('#find-count');
+    if (count) count.textContent = state.find && state.find.matches !== null ? `${state.find.active || 0} / ${state.find.matches}` : '0 / 0';
+  }
   if (!state.private && state.settings.onboarded === false && !onboardingShown && !modal) showOnboarding(0);
   if (modal === 'palette') renderSuggestions($('#command-input')?.value || '');
   if (modal === 'overview') renderOverview($('#overview-filter')?.value || '');
+  renderPasskeys();
+  // 下载面板打开时只更新列表与行状态，不重新调用 showModal/overlay，避免状态循环。
+  if (modal === 'downloads') renderDownloads();
 }
 function renderFavorites() {
   const root=$('#favorites');root.style.display=state.private?'none':'grid';
@@ -83,8 +106,7 @@ function renderPinned() {
   $('#pinned').innerHTML = html.join('');
 }
 function renderTabs() {
-  const pinned = new Set(state.bookmarks.map(b => b.url));
-  const tabs = state.tabs.filter(t => t.spaceID === state.activeSpaceID && !pinned.has(t.url));
+  const tabs = state.tabs.filter(t => t.spaceID === state.activeSpaceID);
   $('#tabs').innerHTML = tabs.length ? tabs.map(tab => `<div class="sidebar-row ${tab.id === state.activeID ? 'active' : ''} ${tab.id === state.splitID ? 'muted' : ''}" data-tab-row="${attr(tab.id)}" draggable="true"><button data-select-tab="${attr(tab.id)}" style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;text-align:left;min-height:28px">${favicon(tab)}<span>${esc(tab.title || hostname(tab.url))}</span>${tab.muted ? icon('mute') : ''}</button><button class="row-close" data-close-tab="${attr(tab.id)}" title="关闭标签页">${icon('close')}</button></div>`).join('') : '<div class="tab-empty">标签页会出现在这里</div>';
 }
 function renderSpaces() {
@@ -92,6 +114,37 @@ function renderSpaces() {
 }
 function panel(title, content, options = {}) {
   return `<section class="panel ${options.class || ''}" role="dialog" aria-modal="true" aria-label="${attr(title)}" ${options.id ? `id="${options.id}"` : ''}><button class="icon panel-close" data-close-modal aria-label="关闭">${icon('close')}</button><h2>${esc(title)}</h2>${content}</section>`;
+}
+// 通行密钥等待条：只显示真实来源与操作状态，不显示 challenge/凭据/密钥材料。
+function renderPasskeys() {
+  const node = $('#passkey-wait'); if (!node) return;
+  const pending = state?.passkeys || [];
+  if (!pending.length) { node.hidden = true; node.innerHTML = ''; return; }
+  const unavailable = state.passkeysPlatform === false;
+  node.hidden = false;
+  node.innerHTML = pending.map(item => `<div class="passkey-row"><div class="grow"><strong>正在等待通行密钥</strong><small>${esc(item.origin)}${unavailable ? ' · 当前版本没有系统通行密钥，请改用安全钥匙、跨设备或密码管理器扩展' : ''}</small></div><button class="button" data-passkey-cancel="${attr(item.id)}">取消</button></div>`).join('');
+}
+function downloadStatus(record) {
+  if (record.state === 'progressing') return `${formatBytes(record.received)} / ${record.total ? formatBytes(record.total) : '未知大小'}`;
+  return { completed: '已完成', cancelled: '已取消', interrupted: '已中断' }[record.state] || esc(record.state);
+}
+function downloadRow(record) {
+  const buttons = record.state === 'progressing' ? `<button class="icon" data-download-pause="${attr(record.id)}" title="暂停">${icon('mute')}</button><button class="icon" data-download-cancel="${attr(record.id)}" title="取消">${icon('close')}</button>` : record.state === 'paused' ? `<button class="icon" data-download-resume="${attr(record.id)}" title="继续">${icon('forward')}</button><button class="icon" data-download-cancel="${attr(record.id)}" title="取消">${icon('close')}</button>` : `<button class="icon" data-download-open="${attr(record.id)}" title="打开">${icon('forward')}</button><button class="icon" data-download-reveal="${attr(record.id)}" title="在 Finder 中显示">${icon('folder')}</button>`;
+  return `<div class="list-row" data-download-row="${attr(record.id)}"><div class="grow"><strong>${esc(record.filename)}</strong><small data-download-progress>${downloadStatus(record)}</small></div>${buttons}</div>`;
+}
+function renderDownloads(force = false) {
+  const node = $('#download-list'); if (!node || !state) return;
+  const list = [...state.downloads].reverse(), signature = list.map(record => record.id + ':' + record.state).join('|');
+  // 只有集合/状态变化才重建行和按钮；进度刷新只改文字，不抢焦点也不丢点击。
+  if (force || node.dataset.signature !== signature) {
+    node.innerHTML = list.length ? list.map(downloadRow).join('') : '<div class="empty">还没有下载</div>';
+    node.dataset.signature = signature;
+    return;
+  }
+  [...node.querySelectorAll('[data-download-row]')].forEach((row, index) => {
+    const record = list[index], progress = row.querySelector('[data-download-progress]');
+    if (record && progress) progress.textContent = downloadStatus(record);
+  });
 }
 function showModal(name, data = {}) {
   modal = name; lastItems = []; call('overlay', { visible: true, kind: name });
@@ -108,11 +161,18 @@ function showModal(name, data = {}) {
   else if (name === 'settings') { root.innerHTML = panel('设置', settingsHTML(data.section || 'general'), { class: 'wide', id: 'settings-panel' }); if ((data.section || 'general') === 'bookmarks') loadBrowserSources(); }
   else if (name === 'extensions') { root.innerHTML = panel('扩展', '<div id="extensions-body"><div class="empty">正在读取扩展…</div></div>', { class: 'small', id: 'extensions-panel' }); loadExtensionPanel(); }
   else if (name === 'history') root.innerHTML = panel('浏览历史', `<p class="description">仅记录普通窗口中成功打开的网页。无痕窗口不写入历史。</p><div class="search-field">${icon('search')}<input id="history-filter" placeholder="搜索历史" aria-label="搜索历史"></div><div class="list" id="history-list">${historyHTML()}</div>`, { class: 'wide' });
-  else if (name === 'downloads') root.innerHTML = panel('下载', `<p class="description">查看下载进度，打开文件、在 Finder 中显示或取消下载。</p><div class="list">${state.downloads.length ? [...state.downloads].reverse().map(d => `<div class="list-row"><div class="grow"><strong>${esc(d.filename)}</strong><small>${d.state === 'progressing' ? `${formatBytes(d.received)} / ${d.total ? formatBytes(d.total) : '未知大小'}` : { completed: '已完成', cancelled: '已取消', interrupted: '已中断' }[d.state] || esc(d.state)}</small></div>${d.state === 'progressing' ? `<button class="icon" data-download-cancel="${attr(d.id)}" title="取消">${icon('close')}</button>` : `<button class="icon" data-download-open="${attr(d.id)}" title="打开">${icon('forward')}</button><button class="icon" data-download-reveal="${attr(d.id)}" title="在 Finder 中显示">${icon('folder')}</button>`}</div>`).join('') : '<div class="empty">还没有下载</div>'}</div>`, { class: 'wide' });
+  else if (name === 'downloads') { root.innerHTML = panel('下载', `<p class="description">查看下载进度，打开文件、在 Finder 中显示或取消下载。</p><div class="list" id="download-list"></div>`, { class: 'wide' }); renderDownloads(true); }
   else if (name === 'overview') root.innerHTML = panel('全部标签页', `<div class="search-field">${icon('search')}<input id="overview-filter" placeholder="筛选标签页" aria-label="筛选标签页"></div><div class="overview-grid" id="overview-grid"></div>`, { class: 'wide' });
-  else if (name === 'passwords') { root.innerHTML = panel('密码', '<div class="empty">正在读取密码列表…</div>', { class: 'wide', id: 'passwords-panel' }); loadCredentials(); }
-  else if (name === 'find') root.innerHTML = `<section class="panel small find-panel" role="dialog" aria-label="页内查找"><input id="find-input" class="field" placeholder="在页面中查找" aria-label="在页面中查找"><button class="icon" data-find="-1" title="上一个">${icon('back')}</button><button class="icon" data-find="1" title="下一个">${icon('forward')}</button><button class="icon" data-action="find-stop" title="关闭">${icon('close')}</button></section>`;
-  else if (name === 'reader') root.innerHTML = panel(data.title || '阅读视图', `<p class="description">${esc(data.byline || activeTab()?.url || '')}</p><article class="reader-content">${readerHTML(data.content || '', data.url)}</article><div class="actions">${button('返回网页', 'reader-close', 'button primary')}</div>`, { id: 'reader-modal' });
+  else if (name === 'passwords') {
+    const localVault = state.private ? '' : `<section id="arco-passwords"><button class="button" data-action="load-arco-passwords">查看 Arco 保存的密码</button></section>`;
+    root.innerHTML = panel('密码', `${systemPasswordsHTML()}${localVault}`, { class: 'wide', id: 'passwords-panel' });
+  }
+  else if (name === 'find') root.innerHTML = `<section class="panel small find-panel" role="dialog" aria-label="页内查找"><input id="find-input" class="field" placeholder="在页面中查找" aria-label="在页面中查找"><span id="find-count" class="pill">0 / 0</span><button class="icon" data-find="-1" title="上一个">${icon('back')}</button><button class="icon" data-find="1" title="下一个">${icon('forward')}</button><button class="icon" data-action="find-stop" title="关闭">${icon('close')}</button></section>`;
+  else if (name === 'http-auth') {
+    const request = state.httpAuth; authRequestID = request.id;
+    const where = request.proxy ? `代理 ${esc(request.host)}:${esc(request.port)}` : esc(request.origin);
+    root.innerHTML = panel(request.proxy ? '登录到代理' : '网站要求登录', `<p class="description">${where}${request.realm ? `（${esc(request.realm)}）` : ''} 要求 HTTP ${request.proxy ? '代理' : 'Basic/Digest'} 登录。凭据只发送给这个请求；Arco 不保存它们。</p><form id="http-auth-form"><input type="hidden" name="id" value="${attr(request.id)}"><label class="field-label">用户名</label><input class="field" name="username" maxlength="1024" autocomplete="username" required><label class="field-label">密码</label><input class="field" name="password" type="password" maxlength="4096" autocomplete="current-password" required><div class="actions">${button('取消', 'http-auth-cancel')}${button('登录', 'http-auth-submit', 'button primary')}</div></form>`, { class: 'small', id: 'http-auth-panel' });
+  }
   else if (name === 'edit-bookmark') root.innerHTML = panel('编辑书签', `<form id="edit-bookmark-form"><input type="hidden" name="id" value="${attr(data.id)}"><label class="field-label">名称</label><input class="field" name="title" required maxlength="500" value="${attr(data.title)}"><label class="field-label">网址</label><input class="field" name="url" type="url" required value="${attr(data.url)}"><div class="actions">${button('取消', 'close-modal')}${button('保存', 'submit-edit-bookmark', 'button primary')}</div></form>`, { class: 'small' });
   else if (name === 'peek') root.innerHTML = panel('打开快速预览', `<form id="peek-form"><label class="field-label">网页地址</label><input class="field" name="url" type="url" required value="https://"><div class="actions">${button('取消', 'close-modal')}${button('预览', 'submit-peek', 'button primary')}</div></form>`, { class: 'small' });
   root.querySelectorAll('[data-close-modal]').forEach(el => el.addEventListener('click', closeModal));
@@ -120,7 +180,7 @@ function showModal(name, data = {}) {
   if (name === 'palette') { renderSuggestions(data.value || ''); $('#command-input').select(); }
   if (name === 'overview') renderOverview('');
 }
-function closeModal() { if (modal === 'onboarding') call('finish-onboarding'); if (modal === 'reader') call('reader'); if (modal === 'find') call('find-stop'); modal = ''; $('#overlay-root').hidden = true; $('#overlay-root').innerHTML = ''; call('overlay', { visible: false }); }
+function closeModal(cancelAuth = true) { const closing = modal, authID = authRequestID; if (closing === 'onboarding') call('finish-onboarding'); if (closing === 'find') call('find-stop'); if (closing === 'http-auth' && cancelAuth && authID) call('http-auth-cancel', { id: authID }); modal = ''; authRequestID = ''; $('#overlay-root').hidden = true; $('#overlay-root').innerHTML = ''; call('overlay', { visible: false }); }
 function commandItems(query) {
   const q = query.toLowerCase().trim(), items = [];
   for (const tab of state.tabs) if (!q || `${tab.title} ${tab.url}`.toLowerCase().includes(q)) items.push({ title: tab.title, subtitle: '打开的标签页 · ' + hostname(tab.url), icon: 'tabs', tabID: tab.id });
@@ -152,17 +212,6 @@ function renderOverview(query) {
   $('#overview-grid').innerHTML = tabs.length ? tabs.map(t => `<button class="overview-card" data-select-tab="${attr(t.id)}">${favicon(t)}<strong>${esc(t.title)}</strong><small>${esc(spaceName(t.spaceID))} · ${esc(hostname(t.url))}</small></button>`).join('') : '<div class="empty">没有匹配的标签页</div>';
 }
 function spaceName(id) { return state.spaces.find(s => s.id === id)?.name || ''; }
-function readerHTML(content, baseURL) {
-  const parsed=new DOMParser().parseFromString(content,'text/html');
-  parsed.querySelectorAll('script,style,iframe,object,embed,form,button,input,select,textarea,link,meta,svg,math').forEach(x=>x.remove());
-  for(const node of parsed.body.querySelectorAll('*')) {
-    for(const attribute of [...node.attributes])if(!['href','src','alt','title','colspan','rowspan'].includes(attribute.name))node.removeAttribute(attribute.name);
-    for(const key of ['href','src'])if(node.hasAttribute(key)) {
-      try {const url=new URL(node.getAttribute(key),baseURL);if(!['http:','https:'].includes(url.protocol))throw Error();if(key==='href'){node.setAttribute('href',url.href);node.setAttribute('data-open-url',url.href);node.setAttribute('role','link');node.setAttribute('tabindex','0');}else node.setAttribute(key,url.href);}catch{node.removeAttribute(key);}
-    }
-  }
-  return parsed.body.innerHTML;
-}
 function formatBytes(bytes) { return bytes > 1024 * 1024 ? (bytes / 1024 / 1024).toFixed(1) + ' MB' : Math.round(bytes / 1024) + ' KB'; }
 function settingsHTML(section) {
   const nav = `<nav class="settings-nav">${[['general', '通用'], ['bookmarks', '书签与导入'], ['sync', '同步'], ['privacy', '隐私与安全'], ['extensions', '扩展'], ['about', '关于 Arco']].map(([key, name]) => `<button data-settings-section="${key}" class="${section === key ? 'active' : ''}">${name}</button>`).join('')}</nav>`;
@@ -170,15 +219,19 @@ function settingsHTML(section) {
   if (section === 'general') content = `<section class="settings-section"><h2>通用</h2><div class="setting-row"><span>搜索引擎<small>地址栏和命令面板使用的搜索服务</small></span><select class="field" id="engine-setting">${[['google', 'Google'], ['duckduckgo', 'DuckDuckGo'], ['bing', 'Bing'], ['baidu', '百度'], ['brave', 'Brave Search']].map(([key, name]) => `<option value="${key}" ${state.settings.engine === key ? 'selected' : ''}>${name}</option>`).join('')}</select></div><div class="setting-row"><span>界面外观<small>窗口色彩同时受当前空间影响</small></span><select class="field" id="theme-setting"><option value="system" ${state.settings.theme === 'system' ? 'selected' : ''}>跟随系统</option><option value="light" ${state.settings.theme === 'light' ? 'selected' : ''}>浅色</option><option value="dark" ${state.settings.theme === 'dark' ? 'selected' : ''}>深色</option></select></div><div class="setting-row"><span>网页圆角边框<small>在网页四周保留 8px 空间边框</small></span><button class="switch ${state.settings.frameInset ? 'on' : ''}" data-setting-toggle="frameInset" role="switch" aria-checked="${state.settings.frameInset}"></button></div><div class="setting-row"><span>跟踪器拦截<small>内置 16 个常见跟踪服务域名的主机后缀规则</small></span><button class="switch ${state.settings.trackerBlocking ? 'on' : ''}" data-setting-toggle="trackerBlocking" role="switch" aria-checked="${state.settings.trackerBlocking}"></button></div><h3>页面操作</h3><div class="actions" style="justify-content:flex-start">${button('打印当前页面', 'print')}${button('保存为 PDF', 'pdf')}${button('页面截图', 'screenshot')}${button('开发者工具', 'devtools')}</div><div class="actions" style="justify-content:flex-start">${button('缩小页面', 'zoom-out')}${button('还原缩放', 'zoom-reset')}${button('放大页面', 'zoom-in')}${button('打开快速预览', 'peek-dialog')}</div></section>`;
   if (section === 'bookmarks') content = `<section class="settings-section"><h2>书签与导入</h2><p class="description">收藏磁贴在所有空间共享。固定书签可放入任意层级文件夹，保存在当前空间。</p><div class="actions" style="justify-content:flex-start">${button('添加当前页为书签', 'add-current-bookmark')}${button('添加当前页到收藏', 'add-current-favorite')}${button('新建文件夹', 'folder-dialog')}</div><h3>从浏览器迁移</h3><p class="description">选择本机浏览器个人资料，导入书签，或迁移密码与 Cookie。已有密码及 Cookie 跳过；迁移需要系统授权，部分网站仍需重新登录。读取受保护的浏览器文件需要在 macOS 中允许 Arco 完全磁盘访问。</p><div class="list" id="browser-sources"><div class="empty">正在检测浏览器…</div></div><h3>从文件导入</h3><p class="description">仅读取你明确选择的文件。支持 Netscape HTML、Chromium Bookmarks JSON、Arc StorableSidebar.json（空间名、固定页面及文件夹路径；支持经典与 Arc Sync 侧栏数据）。</p><div class="actions" style="justify-content:flex-start">${button('选择文件导入', 'import-bookmarks', 'button primary')}${button('导出全部书签为 HTML', 'export-bookmarks')}</div><h3>固定书签</h3><div class="list">${state.allBookmarks.length ? state.allBookmarks.map(b => `<div class="list-row">${icon('bookmark')}<div class="grow"><strong>${esc(b.title)}</strong><small>${esc(spaceName(b.spaceID))} · ${esc(b.url)}</small></div><button class="icon" data-edit-bookmark="${attr(b.id)}" title="编辑">${icon('edit')}</button><button class="icon" data-delete-bookmark="${attr(b.id)}" title="删除">${icon('trash')}</button></div>`).join('') : '<div class="empty">还没有固定书签</div>'}</div></section>`;
   if (section === 'sync') content = `<section class="settings-section"><h2>同步</h2><p class="description">选择已由 iCloud Drive、网盘或其他服务同步的文件夹。书签与空间按记录合并，每台设备独立写入快照，删除记录也会同步。</p><div class="setting-row"><span>同步文件夹<small>${esc(state.settings.syncFolder || '尚未连接')}</small></span>${state.settings.syncFolder ? button('断开', 'disconnect-sync') : button('选择文件夹', 'connect-sync', 'button primary')}</div><div class="setting-row"><span>书签与空间<small>${esc(state.settings.syncStatus || '尚未同步')}</small></span>${button('立即同步书签', 'sync-now')}</div><h3>加密密码同步</h3><p class="description">使用相同的同步口令连接其他 Mac。整个密码库经过 scrypt 和 AES-256-GCM 加密，口令不写入磁盘。解锁保持 15 分钟，明文操作仍需要系统认证。</p>${state.passwordSyncUnlocked ? '<div class="actions">' + button('立即同步密码', 'password-sync-now', 'button primary') + button('锁定同步', 'password-sync-lock') + '</div>' : '<form id="password-sync-form"><label class="field-label">同步口令（至少 12 个字符）</label><input name="passphrase" type="password" class="field" autocomplete="off" minlength="12" maxlength="1024" required><div class="actions">' + button('创建或解锁并同步', 'password-sync-submit', 'button primary') + '</div></form>'}<p class="description">密码同步文件包含加密数据；书签文件包含明文网址。本功能使用你自己的同步文件夹，不是 Google Chrome 账号同步或原生 iCloud Keychain。首次连接另一台设备前，请等待网盘文件同步完成。</p></section>`;
-  if (section === 'privacy') content = `<section class="settings-section"><h2>隐私与安全</h2><p class="description">网页与浏览器界面相互隔离。网站权限分别询问，打开外部应用前需要你确认。</p><div class="setting-row"><span>密码存储<small>密码库在本机加密，密钥由 macOS 钥匙串保护；明文操作要求系统认证</small></span>${button('管理密码', 'passwords')}</div><div class="setting-row"><span>iCloud Keychain<small>当前构建未配置受支持的 Apple Developer 签名与同步 entitlement，原生同步不可用，请使用同步页的加密密码同步，绝不声称已启用云同步</small></span><span class="pill">本地</span></div><div class="setting-row"><span>无痕窗口<small>使用独立内存会话，不写历史、密码或会话文件</small></span>${button('新建无痕窗口', 'private-window')}</div><h3>跟踪器规则覆盖</h3><p class="description">当前仅拦截内置 16 个常见跟踪服务域名及其子域名的非主文档网络请求。这不是 EasyList，不声称具有上游约 130,000 条规则，也不替代完整内容拦截器。</p></section>`;
-  if (section === 'extensions') content = `<section class="settings-section"><h2>扩展</h2><p class="description">从 Chrome 应用商店安装：粘贴商店链接或 32 位扩展 ID。也可以选择本地解压目录（开发者模式）。</p><div class="form-row"><input id="store-input" class="field" placeholder="https://chromewebstore.google.com/detail/… 或 32 位扩展 ID" maxlength="500" autocomplete="off"><button class="button primary" data-action="install-store-input">从商店安装</button></div><div class="notice">安装通过 Google 官方更新接口下载 crx，在本机解包后加载，Arco 不校验扩展签名。商店页面自带的“添加至 Chrome”按钮在 Arco 中无效，请用上面的输入框、地址栏右侧的安装按钮，或商店页面顶部的 Arco 安装栏。部分扩展依赖 Electron 未实现的 API（右键菜单、通知、webNavigation 等），功能可能残缺。</div><div class="actions" style="justify-content:flex-start">${button('选择解压扩展目录', 'add-extension')}</div><h3>从 Chrome 迁移扩展</h3><p class="description">复制所选扩展并在 Arco 中安装，保留启用或停用状态。不会迁移扩展账号、API Key 或内部设置，部分 Chrome API 可能不兼容。</p><div id="chrome-extensions" class="list"></div><div id="extension-list" class="list"><div class="empty">正在读取扩展…</div></div></section>`;
+  if (section === 'privacy') content = `<section class="settings-section"><h2>隐私与安全</h2><p class="description">网页与浏览器界面相互隔离。网站权限分别询问，打开外部应用前需要你确认。</p><div class="setting-row"><span>Arco 保存的密码<small>密码库在本机加密，密钥由 macOS 钥匙串保护；明文操作要求系统认证</small></span>${button('管理密码', 'passwords')}</div><div class="setting-row"><span>Apple“密码”<small>搜索网站，解锁后复制普通密码或验证码，再回网页粘贴；通行密钥不能复制</small></span>${button('打开 Apple“密码”', 'open-system-passwords')}</div><div class="setting-row"><span>Arco 保险库同步<small>Arco 保存的密码与 Apple“密码”独立存储。如需在其他设备使用，可在同步页配置加密文件夹同步；Apple“密码”的 iCloud 设置由系统管理。</small></span><span class="pill">独立存储</span></div><div class="setting-row"><span>通行密钥（Passkeys）<small>当前版本尚未接通 macOS 系统通行密钥。手动打开 Apple“密码”仅用于复制普通密码或验证码，无法完成通行密钥认证。</small></span><span class="pill">${state.passkeysPlatform ? '可用' : '系统未接通'}</span></div><div class="setting-row"><span>无痕窗口<small>使用独立内存会话，不写历史、密码或会话文件</small></span>${button('新建无痕窗口', 'private-window')}</div><h3>跟踪器规则覆盖</h3><p class="description">当前仅拦截内置 16 个常见跟踪服务域名及其子域名的非主文档网络请求。这不是 EasyList，不声称具有上游约 130,000 条规则，也不替代完整内容拦截器。</p></section>`;
+  if (section === 'extensions') content = `<section class="settings-section"><h2>扩展</h2><p class="description">从 Chrome 应用商店安装：粘贴商店链接或 32 位扩展 ID。也可以选择本地解压目录（开发者模式）。</p><div class="form-row"><input id="store-input" class="field" placeholder="https://chromewebstore.google.com/detail/… 或 32 位扩展 ID" maxlength="500" autocomplete="off"><button class="button primary" data-action="install-store-input">从商店安装</button></div><div class="notice">安装通过 Google 官方更新接口下载 crx，先在本机校验签名、扩展 ID 与包内容一致，再解包加载。商店页面自带的“添加至 Chrome”按钮在 Arco 中无效，请用上面的输入框、地址栏右侧的安装按钮，或商店页面顶部的 Arco 安装栏。部分扩展依赖 Electron 未实现的 API（右键菜单、通知、webNavigation 等），功能可能残缺。</div><div class="actions" style="justify-content:flex-start">${button('选择解压扩展目录', 'add-extension')}</div><h3>从 Chrome 迁移扩展</h3><p class="description">复制所选扩展并在 Arco 中安装，保留启用或停用状态。不会迁移扩展账号、API Key 或内部设置，部分 Chrome API 可能不兼容。</p><div id="chrome-extensions" class="list"></div><div id="extension-list" class="list"><div class="empty">正在读取扩展…</div></div></section>`;
   if (section === 'about') content = `<section class="settings-section"><h2>Arco</h2><div class="brand-mark" style="font-size:28px;justify-content:flex-start;margin:20px 0"><span class="arc-symbol" style="width:28px;height:24px"></span><span>Arco</span></div><p class="description">独立 Chromium 桌面浏览器 · Chromium ${esc(state.chromium)}<br>默认窗口 1280 × 820 · 空间、收藏与本地密码</p><p class="description">界面设计参考 Zigzag 的 Arc 风格侧栏及 Apache-2.0 许可实现。Arco 使用自己的名称、A/arc 图标和 wordmark，不隶属于 Arc、Zigzag 或 The Browser Company。</p><p class="description">数据目录：${esc(state.settings.dataDirectory || ' ~/Library/Application Support/Arco')}<br>本地数据使用原子写入；损坏文件会保留备份。密码不会写入文件夹同步或日志。</p><p class="description">详细功能差异、签名与同步说明请查看项目 README 和 NOTICE。</p><div class="actions" style="justify-content:flex-start">${button('重新查看欢迎引导', 'welcome-tour')}</div></section>`;
   return `<div class="settings-layout">${nav}<div>${content}</div></div>`;
 }
 async function loadCredentials() {
+  const section = $('#arco-passwords');
+  if (!section || state.private) return;
+  section.innerHTML = '<div class="empty">正在读取 Arco 保存的密码…</div>';
   const credentials = await call('credentials');
-  if (modal !== 'passwords' || !credentials) return;
-  $('#passwords-panel').innerHTML = `<h2>密码</h2><p class="description">本机加密保险库 · 密钥由 macOS 钥匙串保护。明文显示、复制与导出需要 Touch ID 或系统密码。</p><div class="actions" style="justify-content:flex-start">${button('添加密码', 'new-credential', 'button primary')}${button('生成强密码', 'generate-password')}${button('导入 CSV', 'import-passwords')}${button('导出明文 CSV', 'export-passwords')}</div><div class="notice">仅填充与保存时完全相同的协议、主机和端口，且仅对当前可见标签页操作。普通 HTTP 网站禁止自动填充；localhost 可用于本地测试。</div><div id="credential-list">${credentials.length ? credentials.map(credentialHTML).join('') : '<div class="empty">还没有保存的密码</div>'}</div>`;
+  if (modal !== 'passwords' || !$('#arco-passwords')) return;
+  if (credentials === null) { $('#arco-passwords').innerHTML = button('重试查看 Arco 保存的密码', 'load-arco-passwords'); return; }
+  $('#arco-passwords').innerHTML = `<h3>Arco 保存的密码</h3><p class="description">本机加密保险库 · 密钥由 macOS 钥匙串保护。明文显示、复制与导出需要 Touch ID 或系统密码。</p><div class="actions" style="justify-content:flex-start">${button('添加密码', 'new-credential', 'button primary')}${button('生成强密码', 'generate-password')}${button('导入 CSV', 'import-passwords')}${button('导出明文 CSV', 'export-passwords')}</div><div class="notice">仅填充与保存时完全相同的协议、主机和端口，且仅对当前可见标签页操作。普通 HTTP 网站禁止自动填充；localhost 可用于本地测试。</div><div id="credential-list">${credentials.length ? credentials.map(credentialHTML).join('') : '<div class="empty">还没有保存的密码</div>'}</div>`;
 }
 function credentialHTML(c) { return `<div class="credential">${icon('key')}<div class="grow"><strong>${esc(c.username || '未填写用户名')}</strong><small>${esc(c.origin)}</small></div><button class="button" data-fill-credential="${attr(c.id)}">填充到当前页</button><button class="icon" data-read-credential="${attr(c.id)}" title="显示或复制">${icon('search')}</button><button class="icon" data-delete-credential="${attr(c.id)}" title="删除">${icon('trash')}</button></div>`; }
 async function readCredential(id) { const credential = await call('credential-read', { id }); if (!credential) return; showModal('credential-detail', credential); $('#overlay-root').innerHTML = panel('已解锁密码', `<p class="description">${esc(credential.origin)}</p><label class="field-label">用户名</label><input class="field" readonly value="${attr(credential.username)}"><label class="field-label">密码</label><input class="field" type="password" id="revealed-password" readonly value="${attr(credential.password)}"><div class="actions">${button('显示 / 隐藏', 'toggle-password')}${button('复制密码', 'copy-password', 'button primary')}</div>`, { class: 'small' }); }
@@ -257,22 +310,25 @@ function showOnboarding(step = 0) {
   if (ONBOARD_STEPS[step] === 'extensions') loadChromeExtensions();
 }
 const actions = {
-  'toggle-sidebar': () => call('toggle-sidebar'), back: () => call('back'), forward: () => call('forward'), reload: () => call(activeTab()?.loading ? 'stop' : 'reload'),
+  'toggle-sidebar': () => call('toggle-sidebar'), back: () => call('back'), forward: () => call('forward'), reload: () => call(commandLoading() ? 'stop' : 'reload'),
   palette: () => showModal('palette', { value: isBlank() ? '' : activeTab()?.url }), 'new-tab': () => call('new-tab'), 'close-modal': closeModal,
   'clear-tabs': () => call('clear-tabs'), downloads: () => showModal('downloads'), settings: () => showModal('settings'), history: () => showModal('history'),
   passwords: () => showModal('passwords'), overview: () => showModal('overview'), menu: () => call('menu'),
+  'load-arco-passwords': loadCredentials,
+  'open-system-passwords': async () => { if (await call('open-system-passwords') === true) closeModal(); },
   'add-space': () => showModal('space'), 'toggle-split': () => call('toggle-split'), 'close-split': () => call('toggle-split'),
   'add-current-bookmark': () => { if (!isBlank()) showModal('bookmark'); },
   'add-current-favorite': async () => { const tab = activeTab(); if (!isBlank() && await call('add-favorite', { title: tab.title.slice(0,500), url: tab.url })) toast('常驻网站已保存'); },
   'favorite-dialog': () => showModal('favorite'), 'submit-favorite': () => $('#favorite-form').requestSubmit(),
   'bookmark-dialog': () => showModal('bookmark'), 'folder-dialog': () => showModal('folder'),
   'close-peek': () => call('close-peek'), 'peek-to-tab': () => call('peek-to-tab'), 'peek-dialog': () => showModal('peek'),
-  reader: async () => { const article = await call('reader'); if (article) showModal('reader', article); }, 'reader-close': closeModal,
+  reader: () => call('reader'),
   find: () => showModal('find'), 'find-stop': () => { call('find-stop'); closeModal(); },
   'private-window': () => { closeModal(); call('private-window'); },
   print: () => call('print'), pdf: () => call('pdf'), screenshot: () => call('screenshot'), devtools: () => call('devtools'),
   'zoom-out': () => call('zoom', { delta: -0.1 }), 'zoom-in': () => call('zoom', { delta: 0.1 }), 'zoom-reset': () => call('zoom', { reset: true }),
   'capture-save': async () => { if (await call('capture-save') !== null || !state.capture) { closeModal(); toast('密码已保存到加密保险库'); } }, 'capture-dismiss': () => { call('capture-dismiss'); closeModal(); },
+  'http-auth-submit': () => $('#http-auth-form').requestSubmit(), 'http-auth-cancel': closeModal,
   'import-bookmarks': async () => { const result = await call('import-bookmarks'); if (result !== null) { showModal('settings', { section: 'bookmarks' }); toast('导入完成，重复网址已跳过'); } },
   'export-bookmarks': async () => { if (await call('export-bookmarks')) toast('书签已导出为 HTML'); },
   'connect-sync': async () => { await call('connect-sync'); showModal('settings', { section: 'sync' }); }, 'disconnect-sync': async () => { await call('disconnect-sync'); showModal('settings', { section: 'sync' }); },
@@ -281,7 +337,7 @@ const actions = {
   'remove-space': async () => { const id=$('#space-form [name="id"]').value;if (await call('confirm-clear', { message: '删除此空间及其固定书签？此操作会通过同步传播。' })) { closeModal(); await call('remove-space', { id }); } },
   'submit-edit-bookmark': () => $('#edit-bookmark-form').requestSubmit(), 'submit-peek': () => $('#peek-form').requestSubmit(),
   'new-credential': showNewCredential, 'submit-credential': () => $('#credential-form').requestSubmit(),
-  'generate-password': async () => { const value = await call('generate-password'); if (value && modal === 'passwords') { $('#passwords-panel .notice').innerHTML = `<strong>新生成的密码（尚未保存）</strong><div class="password-generated">${esc(value)}</div><button class="button" data-copy-generated>复制</button>`; $('[data-copy-generated]').onclick = () => { call('copy', { text: value }); toast('已复制，请添加到密码或用于注册'); }; } },
+  'generate-password': async () => { const value = await call('generate-password'); if (value && modal === 'passwords') { $('#arco-passwords .notice').innerHTML = `<strong>新生成的密码（尚未保存）</strong><div class="password-generated">${esc(value)}</div><button class="button" data-copy-generated>复制</button>`; $('[data-copy-generated]').onclick = () => { call('copy', { text: value }); toast('已复制，请添加到密码或用于注册'); }; } },
   'import-passwords': async () => { const result = await call('import-passwords'); if (result !== null) { toast(`已导入 ${result.imported} 条密码，跳过 ${result.skipped} 条已有记录`); if (modal === 'passwords') loadCredentials(); } },
   'export-passwords': async () => { if (await call('export-passwords')) toast('明文 CSV 已导出，请尽快安全删除'); },
   'toggle-password': () => { const field = $('#revealed-password'); field.type = field.type === 'password' ? 'text' : 'password'; },
@@ -324,6 +380,9 @@ document.addEventListener('click', async event => {
   if (a.downloadOpen) return call('download-open', { id: a.downloadOpen });
   if (a.downloadReveal) return call('download-reveal', { id: a.downloadReveal });
   if (a.downloadCancel) return call('download-cancel', { id: a.downloadCancel });
+  if (a.downloadPause) { await call('download-pause', { id: a.downloadPause }); return; }
+  if (a.downloadResume) { await call('download-resume', { id: a.downloadResume }); return; }
+  if (a.passkeyCancel) return call('passkey-cancel', { id: a.passkeyCancel });
   if (a.importChrome) {
     const group = el.closest('[data-chrome-profile]');
     const ids = [...group.querySelectorAll('[data-chrome-extension]:checked:not(:disabled)')].map(input => input.dataset.chromeExtension);
@@ -394,15 +453,22 @@ document.addEventListener('click', async event => {
 $('#space-heading').addEventListener('click', () => { if (!state.private) showModal('space', { id: state.activeSpaceID }); });
 $('#overlay-root').addEventListener('click', event => { if (event.target === $('#overlay-root') && modal !== 'capture') closeModal(); });
 document.addEventListener('submit', async event => {
-  event.preventDefault(); const data = Object.fromEntries(new FormData(event.target));
-  if (event.target.id === 'favorite-form') { if(await call('add-favorite',data)!==null){closeModal();toast('常驻网站已保存');} }
-  if (event.target.id === 'bookmark-form') { if (await call('add-bookmark', data) !== null) { closeModal(); toast('书签已保存到当前空间'); } }
-  if (event.target.id === 'folder-form') { if (await call(data.id ? 'update-folder' : 'add-folder', data) !== null) closeModal(); }
-  if (event.target.id === 'space-form') { if (!data.useCustom) data.customColor = ''; else data.customColor = data.customColor || '#d9e6f7'; if (data.id) { if (await call('update-space', data) !== null) closeModal(); } else { if (await call('add-space', data) !== null) closeModal(); } }
-  if (event.target.id === 'edit-bookmark-form') { if (await call('update-bookmark', data) !== null) closeModal(); }
-  if (event.target.id === 'peek-form') { closeModal(); await call('peek', { url: data.url }); }
-  if (event.target.id === 'password-sync-form') { const input=event.target.elements.passphrase; const passphrase=input.value; input.value=''; if(await call('password-sync-unlock',{passphrase}) && await call('password-sync-now')) {showModal('settings',{section:'sync'});toast('加密密码同步完成');} }
-  if (event.target.id === 'credential-form') { if (await call('credential-save', data)) { toast('密码已保存到加密保险库'); showModal('passwords'); } }
+  event.preventDefault();
+  // 表单里有 name="id" 的隐藏字段时，form.id 的命名属性会覆盖 id 属性返回该 input，必须读属性。
+  const form = event.target, formID = form.getAttribute('id'), data = Object.fromEntries(new FormData(form));
+  if (formID === 'favorite-form') { if(await call('add-favorite',data)!==null){closeModal();toast('常驻网站已保存');} }
+  if (formID === 'bookmark-form') { if (await call('add-bookmark', data) !== null) { closeModal(); toast('书签已保存到当前空间'); } }
+  if (formID === 'folder-form') { if (await call(data.id ? 'update-folder' : 'add-folder', data) !== null) closeModal(); }
+  if (formID === 'space-form') { if (!data.useCustom) data.customColor = ''; else data.customColor = data.customColor || '#d9e6f7'; if (data.id) { if (await call('update-space', data) !== null) closeModal(); } else { if (await call('add-space', data) !== null) closeModal(); } }
+  if (formID === 'edit-bookmark-form') { if (await call('update-bookmark', data) !== null) closeModal(); }
+  if (formID === 'peek-form') { closeModal(); await call('peek', { url: data.url }); }
+  if (formID === 'password-sync-form') { const input=form.elements.passphrase; const passphrase=input.value; input.value=''; if(await call('password-sync-unlock',{passphrase}) && await call('password-sync-now')) {showModal('settings',{section:'sync'});toast('加密密码同步完成');} }
+  if (formID === 'credential-form') { if (await call('credential-save', data)) { toast('密码已保存到加密保险库'); showModal('passwords'); } }
+  if (formID === 'http-auth-form') {
+    const password = data.password; data.password = '';
+    const result = await call('http-auth-submit', { id: data.id, username: data.username, password });
+    if (result !== null) closeModal(false);
+  }
 });
 document.addEventListener('input', event => {
   if (event.target.id === 'command-input') { selectedSuggestion = 0; renderSuggestions(event.target.value); }

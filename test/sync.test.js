@@ -125,6 +125,18 @@ test('rejected library writes preserve memory, file bytes and reopen',t=>{
   assert.equal(new Library(root,()=>{}).space('personal').name,'个人');
 });
 
+test('injected library write failure preserves memory, disk and later saves',t=>{
+  const root=temporary(t),library=new Library(root,()=>{}),before=fs.readFileSync(library.file,'utf8'),memory=structuredClone(library.data);
+  t.mock.method(core,'atomicWrite',()=>{throw new Error('disk unavailable');});
+  assert.throws(()=>library.addBookmark({spaceID:'personal',title:'Failed write',url:'https://failed.test/'}),/disk unavailable/);
+  assert.deepEqual(library.data,memory);assert.equal(fs.readFileSync(library.file,'utf8'),before);
+  t.mock.restoreAll();
+  library.addBookmark({spaceID:'personal',title:'Later write',url:'https://later.test/'});
+  const reopened=new Library(root,()=>{});
+  assert.equal(reopened.space('personal').bookmarks.some(x=>x.title==='Failed write'),false);
+  assert.equal(reopened.space('personal').bookmarks.some(x=>x.title==='Later write'),true);
+});
+
 test('oversized fresh imports reject atomically instead of dropping records',t=>{
   const root=temporary(t),library=new Library(root,()=>{}),before=fs.readFileSync(library.file,'utf8'),memory=structuredClone(library.data);
   const items=Array.from({length:20001},(_,i)=>({title:'B'+i,url:'https://example.test/'+i,folders:[]}));

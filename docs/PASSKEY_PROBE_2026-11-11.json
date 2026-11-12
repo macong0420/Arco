@@ -1,0 +1,78 @@
+{
+  "engine": {
+    "electron": "45.2.3",
+    "chromium": "156.0.8078.80",
+    "configureWebAuthn": "function"
+  },
+  "baseline": {
+    "available": false,
+    "capabilities": {
+      "conditionalCreate": true,
+      "conditionalGet": true,
+      "extension:appid": true,
+      "extension:appidExclude": true,
+      "extension:cmtgKey": false,
+      "extension:credBlob": true,
+      "extension:credProps": true,
+      "extension:credentialProtectionPolicy": true,
+      "extension:crossDeviceFallbackUrl": false,
+      "extension:enforceCredentialProtectionPolicy": true,
+      "extension:getCredBlob": true,
+      "extension:hmacCreateSecret": true,
+      "extension:largeBlob": true,
+      "extension:minPinLength": true,
+      "extension:payment": true,
+      "extension:prf": true,
+      "hybridTransport": true,
+      "immediateGet": true,
+      "passkeyPlatformAuthenticator": true,
+      "relatedOrigins": true,
+      "signalAllAcceptedCredentials": true,
+      "signalCurrentUserDetails": true,
+      "signalUnknownCredential": true,
+      "userVerifyingPlatformAuthenticator": false
+    },
+    "request": {
+      "status": "still-pending"
+    },
+    "elapsedMs": 2505
+  },
+  "configured": {
+    "available": true,
+    "capabilities": {
+      "conditionalCreate": true,
+      "conditionalGet": true,
+      "extension:appid": true,
+      "extension:appidExclude": true,
+      "extension:cmtgKey": false,
+      "extension:credBlob": true,
+      "extension:credProps": true,
+      "extension:credentialProtectionPolicy": true,
+      "extension:crossDeviceFallbackUrl": false,
+      "extension:enforceCredentialProtectionPolicy": true,
+      "extension:getCredBlob": true,
+      "extension:hmacCreateSecret": true,
+      "extension:largeBlob": true,
+      "extension:minPinLength": true,
+      "extension:payment": true,
+      "extension:prf": true,
+      "hybridTransport": true,
+      "immediateGet": true,
+      "passkeyPlatformAuthenticator": true,
+      "relatedOrigins": true,
+      "signalAllAcceptedCredentials": true,
+      "signalCurrentUserDetails": true,
+      "signalUnknownCredential": true,
+      "userVerifyingPlatformAuthenticator": true
+    },
+    "request": {
+      "status": "rejected",
+      "name": "NotAllowedError",
+      "message": "The operation either timed out or was not allowed. See: https://www.w3.org/TR/webauthn-2/#sctn-privacy-considerations-client."
+    },
+    "elapsedMs": 5
+  },
+  "logs": [
+    "WebAuthn platform passkey request failed (ASAuthorizationError 1004). This usually means the app isn't signed with the associated-domains entitlement, or the relying party's domain isn't serving a valid .well-known/apple-app-site-association with a \"webcredentials\" entry for this app. Platform passkeys require a real associated domain (there is no localhost rpId); development-signed builds can test against one via the entitlement's ?mode=developer modifier."
+  ]
+}

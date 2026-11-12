@@ -10,7 +10,7 @@ const root = path.join(__dirname, '..');
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'arco-e2e-'));
 let app, shell, server, origin;
 async function launch() {
-  app = await electron.launch({ args: [root], env: { ...process.env, ARCO_TEST_MODE: '1', ARCO_USER_DATA_DIR: profile }, timeout: 15000 });
+  app = await electron.launch({ args: [root], env: { ...process.env, ARCO_TEST_MODE: '1', ARCO_USER_DATA_DIR: profile, ...(origin ? { ARCO_TEST_PERMISSION_GRANTS: JSON.stringify([{ origin, permission: 'notifications', allow: true }]) } : {}) }, timeout: 15000 });
   shell = null;
   for (let i=0;i<200&&!shell;i++) {
     shell=(await app.windows()).find(page=>/shell\.html$/.test(page.url()));
@@ -41,14 +41,51 @@ async function remote(url) {
   throw new Error('Missing real Chromium target: '+url);
 }
 async function waitState(check) { await assertEventually(async()=>check(await inspect('state'))); }
+// 页面焦点快捷键必须用原生等价输入验证：Playwright 的 CDP 键盘事件不触发 before-input-event。
+const press = (page, key, modifiers = []) => inspect('press', { url: page.url(), key, modifiers });
+async function readerPage() {
+  for (let i = 0; i < 100; i++) {
+    const page = (await app.windows()).find(candidate => candidate.url().startsWith('data:text/html'));
+    if (page) { await page.waitForLoadState('domcontentloaded'); return page; }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new Error('Missing reader view');
+}
 async function assertEventually(check) { for(let i=0;i<100;i++){if(await check())return;await new Promise(r=>setTimeout(r,50));}throw new Error('State did not converge'); }
 const fixture = '<!doctype html><title>Arco Fixture</title><link rel="icon" href="/ui-icon.svg"><h1>Real Chromium fixture</h1><form action="/welcome"><input name="username" autocomplete="username" value="alice"><input name="password" type="password" autocomplete="current-password"><button type="submit">Sign in</button></form><a id="peek-link" href="/second">Second page</a>';
-test('real app: Chromium, overlays, spaces, split, passwords, private isolation and restart', {timeout:60000}, async t=>{
+test('real app: Chromium, overlays, spaces, split, passwords, private isolation and restart', {timeout:120000}, async t=>{
+  const requestCounts=new Map(),authAttempts=[],authChallenges=[],authSuccesses=[];
+  const count=request=>requestCounts.set(request.url.split('?')[0],(requestCounts.get(request.url.split('?')[0])||0)+1);
   server=http.createServer((req,res)=>{
+    count(req);
     if(req.url.startsWith('/ui-icon.svg')){res.setHeader('Content-Type','image/svg+xml');return res.end('<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><rect width="128" height="128" rx="28" fill="#4e78ca"/><path d="M32 92V60a32 32 0 0 1 64 0v32M44 76h40" fill="none" stroke="white" stroke-width="12"/></svg>');}
+    if(req.url.startsWith('/fixture.txt')){res.setHeader('Content-Type','text/plain');res.setHeader('Content-Disposition','attachment; filename="arco-popup.txt"');return res.end('popup download fixture');}
+    if(req.url.startsWith('/basic-')){
+      const path=req.url.split('?')[0];
+      const expected={ '/basic-tab':['tab-user','tab-secret'], '/basic-popup':['popup-user','popup-secret'], '/basic-private':['private-user','private-secret'], '/basic-cancel':['never','never'], '/basic-close':['never','never'] }[path];
+      // 每个受保护区用独立 realm：Chromium 按 origin+realm 缓存认证，共用 realm 会让“取消”自动重放旧凭据。
+      const realm={ '/basic-tab':'Arco tab', '/basic-popup':'Arco popup', '/basic-private':'Arco private', '/basic-cancel':'Arco cancel', '/basic-close':'Arco close' }[path]||'Arco fixture';
+      const header=req.headers.authorization||'',decoded=header.startsWith('Basic ')?Buffer.from(header.slice(6),'base64').toString():'';
+      const [username,password]=decoded.split(':');authAttempts.push({path,username,password:password?'provided':'',realm});
+      if(username!==expected[0]||password!==expected[1]){authChallenges.push({path,username});res.writeHead(401,{'WWW-Authenticate':`Basic realm="${realm}"`,'Content-Type':'text/html; charset=utf-8'});return res.end('<title>Auth Required</title>');}
+      authSuccesses.push({path,username});
+      res.setHeader('Content-Type','text/html; charset=utf-8');return res.end(`<title>Authenticated ${username}</title><h1>Authenticated ${username}</h1>`);
+    }
     res.setHeader('Content-Type','text/html; charset=utf-8');
     if(req.url.startsWith('/welcome'))return res.end('<title>Welcome</title><h1>Signed in</h1>');
     if(req.url.startsWith('/second'))return res.end('<title>Second Fixture</title><h1>Second page</h1>');
+    if(req.url.startsWith('/split-left'))return res.end('<title>Split Left</title><body>left unique findtarget</body>');
+    if(req.url.startsWith('/split-right'))return res.end('<title>Split Right</title><body><p>right unique findtarget</p><p>right unique findtarget again</p></body>');
+    if(req.url.startsWith('/peek-state'))return res.end('<title>Peek A</title><a id="next" href="/peek-next">Next</a>');
+    if(req.url.startsWith('/shortcut-target'))return res.end('<title>Shortcut Target</title><h1>Shortcut target</h1>');
+    if(req.url.startsWith('/shortcut'))return res.end('<title>Shortcut Fixture</title><a id="peek-link" href="/shortcut-target">Shortcut target</a>');
+    if(req.url.startsWith('/peek-next'))return res.end('<title>Peek B</title><input id="peek-field" value=""><script>window.loadedAt=performance.now()</script>');
+    if(req.url.startsWith('/reader-invalid'))return res.end('<!doctype html><title></title><body></body>');
+    if(req.url.startsWith('/reader-valid'))return res.end('<title>Reader Fixture</title><article><h1>Reader Fixture</h1>'+Array.from({length:12},(_,i)=>`<p>Paragraph ${i} with enough readable article text for Readability extraction.</p>`).join('')+'<p><a id="reader-link" href="/reader-follow" onclick="window.readerScriptRan=true">Read more</a></p></article><script>window.pageScriptRan=true</script>');
+    if(req.url.startsWith('/reader-follow'))return res.end('<title>Reader Follow</title><h1>Followed link</h1>');
+    if(req.url.startsWith('/popup-owner'))return res.end('<title>Popup Owner</title><button id="open-download">Download popup</button><button id="open-permission">Permission popup</button><button id="open-auth">Auth popup</button><script>document.getElementById("open-download").onclick=()=>window.open("/popup-download","download","width=430,height=530");document.getElementById("open-permission").onclick=()=>window.open("/popup-permission","permission","width=430,height=530");document.getElementById("open-auth").onclick=()=>window.open("/basic-popup","auth","width=430,height=530")</script>');
+    if(req.url.startsWith('/popup-download'))return res.end('<title>Popup Download</title><a id="download" href="/fixture.txt" download>Download</a>');
+    if(req.url.startsWith('/popup-permission'))return res.end('<title>Popup Permission</title><button id="ask">Ask</button><div id="result">waiting</div><script>document.getElementById("ask").onclick=async()=>{document.getElementById("result").textContent=await Notification.requestPermission()}</script>');
     if(req.url.startsWith('/oauth-provider'))return res.end('<title>OAuth Provider</title><script>try{if(typeof require!=="undefined"||window.arco)throw new Error("unsafe context");window.opener.postMessage("code=e2e","*")}catch(e){document.title="no-opener"}setTimeout(()=>window.close(),80)</script>');
     if(req.url.startsWith('/oauth-frame'))return res.end('<button id="frame-go">登录</button><script>document.getElementById("frame-go").onclick=()=>window.open("/oauth-provider","auth");window.addEventListener("message",e=>parent.postMessage(e.data,"*"))</script>');
     if(req.url.startsWith('/oauth-start')){
@@ -56,11 +93,15 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
       const open=mode==='tab'?'window.open("/oauth-provider","auth")':mode==='blank'?'(() => {const p=window.open("","auth");p.location.href="/oauth-provider"})()':'window.open("/oauth-provider","auth","width=420,height=520")';
       return res.end(`<title>OAuth Start</title><button id="go">第三方登录</button><div id="result">waiting</div>${mode==='iframe'||mode==='cross-origin'?`<iframe src="${mode==='cross-origin'?origin.replace('127.0.0.1','localhost'):origin}/oauth-frame"></iframe>`:''}<script>document.getElementById("go").onclick=()=>${open};window.addEventListener("message",e=>{document.getElementById("result").textContent="got:"+e.data})</script>`);
     }
+    if(req.url.startsWith('/peek-base'))return res.end('<title>Peek Base</title><form><input id="draft" name="draft" value=""></form>');
+    if(req.url.startsWith('/peek-target'))return res.end('<title>Peek Target</title><h1>Peek target</h1>');
+    if(req.url.startsWith('/slow-page')){setTimeout(()=>res.end('<title>Slow Page</title><h1>Slow page</h1>'),700);return;}
     res.end(fixture);
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve)); origin='http://127.0.0.1:'+server.address().port;
   t.after(async()=>{await close();await new Promise(resolve=>server.close(resolve));fs.rmSync(profile,{recursive:true,force:true});});
   await launch();
+  await app.evaluate(({session},directory)=>session.fromPartition('persist:arco').setDownloadPath(directory),profile);
   await t.test('Chromium pages are real isolated targets',async()=>{
     assert.match(await app.evaluate(()=>process.versions.chrome),/^\d+\./);
     await invoke('navigate',{input:origin+'/'}); const page=await remote(origin+'/');
@@ -122,12 +163,16 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     await shell.keyboard.press('Escape');
     await assertEventually(async()=>(await inspect('views')).some(x=>x.visible));
   });
-  await t.test('reader links remove privileged attributes and remain keyboard operable',async()=>{
-    await shell.evaluate(url=>{showModal('reader-link-check');document.querySelector('#overlay-root').innerHTML='<section class="panel"><article class="reader-content">'+readerHTML('<a href="/reader-follow" onclick="throw 1" data-action="private-window">Read more</a>',url)+'</article></section>';},origin+'/article');
-    const link=shell.locator('.reader-content a');assert.equal(await link.getAttribute('onclick'),null);assert.equal(await link.getAttribute('data-action'),null);
-    assert.equal(await link.getAttribute('href'),origin+'/reader-follow');await link.focus();await shell.keyboard.press('Enter');
-    await waitState(s=>s.tabs.some(t=>t.url===origin+'/reader-follow'));assert.match(shell.url(),/shell\.html$/);
-    assert.equal((await inspect('windows')).length,1);
+  await t.test('reader view strips scripts and handlers, and its links open as ordinary tabs',async()=>{
+    await invoke('new-tab',{url:origin+'/reader-valid'}); await remote(origin+'/reader-valid');
+    await invoke('reader'); await waitState(s=>s.reader===true);
+    const reader=await readerPage();
+    assert.equal(await reader.evaluate(()=>window.pageScriptRan),undefined,'page scripts must not run in the reader');
+    assert.equal(await reader.evaluate(()=>[...document.querySelectorAll('*')].some(el=>[...el.attributes].some(attribute=>/^on/i.test(attribute.name)))),false,'inline handlers must be removed');
+    const before=(await inspect('state')).tabs.length;
+    await reader.click('#reader-link');
+    await waitState(s=>!s.reader&&s.tabs.length===before+1&&s.tabs.some(tab=>tab.url===origin+'/reader-follow'));
+    assert.match(shell.url(),/shell\.html$/);assert.equal((await inspect('windows')).length,1);
   });
   await t.test('Spaces, bookmark persistence and split cleanup',async()=>{
     await invoke('add-space',{name:'工作',color:'lavender'}); await waitState(s=>s.spaces.some(x=>x.name==='工作')&&s.activeSpaceID===s.spaces.find(x=>x.name==='工作').id);
@@ -153,7 +198,220 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     const page=await remote(origin+'/login-work'); await page.locator('#peek-link').click({modifiers:['Shift']});
     await waitState(s=>!!s.peek); await invoke('close-peek'); await waitState(s=>!s.peek);
   });
+  await t.test('split focus directs page commands and closing the focused secondary restores the primary',async()=>{
+    await invoke('new-tab',{url:origin+'/split-left'}); const leftID=(await inspect('state')).activeID; const left=await remote(origin+'/split-left');
+    await invoke('new-tab',{url:origin+'/split-right'}); const rightID=(await inspect('state')).activeID; const right=await remote(origin+'/split-right');
+    await invoke('toggle-split',{id:leftID}); assert.equal((await inspect('state')).splitID,leftID);
+    await inspect('click',{url:right.url(),x:20,y:20}); await waitState(s=>s.focusedPaneID===rightID);
+    const before=requestCounts.get('/split-right'); await invoke('reload'); await assertEventually(()=>requestCounts.get('/split-right')>before);
+    await invoke('find',{query:'right unique findtarget'}); await waitState(s=>s.find?.targetID===rightID&&s.find.matches===2&&s.find.active===1);
+    await press(right,'G',['meta']); await waitState(s=>s.find?.active===2);
+    await press(right,'G',['meta','shift']); await waitState(s=>s.find?.active===1);
+    await invoke('find',{query:''}); await waitState(s=>!s.find);
+    await inspect('click',{url:left.url(),x:20,y:20}); await waitState(s=>s.focusedPaneID===leftID&&s.splitID===leftID);
+    await invoke('close-tab',{id:rightID}); await waitState(s=>!s.splitID&&s.focusedPaneID===leftID&&s.activeID===leftID);
+    assert.equal((await inspect('views')).filter(x=>x.visible).length,1);
+  });
+  await t.test('reload and close follow the focused pane and the Peek layer through the real controls',async()=>{
+    // Peek 打开时刷新只重载 Peek，被遮住的底层页面保留表单内容。
+    await invoke('new-tab',{url:origin+'/peek-base'}); const base=await remote(origin+'/peek-base');
+    await base.locator('#draft').fill('keep me');
+    await invoke('peek',{url:origin+'/peek-target'}); await remote(origin+'/peek-target');
+    // 等壳层自己收到加载完成：加载中的按钮是“停止”，完成后才是“重新加载”。
+    await shell.waitForFunction(()=>document.querySelector('[data-action="reload"]').title==='重新加载');
+    const peekBefore=requestCounts.get('/peek-target'), baseBefore=requestCounts.get('/peek-base');
+    await shell.locator('[data-action="reload"]').first().click();
+    await assertEventually(()=>requestCounts.get('/peek-target')>peekBefore);
+    assert.equal(requestCounts.get('/peek-base'),baseBefore,'a Peek reload must not reload the hidden page');
+    await waitState(s=>!!s.peek);
+    assert.equal(await base.locator('#draft').inputValue(),'keep me');
+    await invoke('close-peek'); await waitState(s=>!s.peek);
+    // 分屏：左侧正在加载、焦点在右侧时，真实刷新按钮仍刷新右侧，而不是向右侧发送 stop。
+    await invoke('new-tab',{url:origin+'/split-left'}); const leftID=(await inspect('state')).activeID; await remote(origin+'/split-left');
+    await invoke('new-tab',{url:origin+'/split-right'}); const rightID=(await inspect('state')).activeID; await remote(origin+'/split-right');
+    await invoke('toggle-split',{id:leftID}); await waitState(s=>s.splitID===leftID);
+    await inspect('click',{url:origin+'/split-right',x:20,y:20}); await waitState(s=>s.focusedPaneID===rightID);
+    const rightBefore=requestCounts.get('/split-right');
+    const navigation=invoke('navigate',{input:origin+'/slow-page',tabID:leftID}).catch(()=>null);
+    await waitState(s=>s.tabs.find(tab=>tab.id===leftID)?.loading===true);
+    // 左侧加载中、焦点在右侧：真实按钮必须显示“重新加载”（跟聚焦窗格，而不是左侧）。
+    await shell.waitForFunction(()=>document.querySelector('[data-action="reload"]').title==='重新加载');
+    await shell.locator('[data-action="reload"]').first().click();
+    await assertEventually(()=>requestCounts.get('/split-right')>rightBefore);
+    await navigation;
+    await assertEventually(async()=>(await inspect('evaluate',{id:leftID,script:'document.title'}))==='Slow Page','the loading pane must not be stopped');
+    // 统一关闭：焦点在右侧时 ⌘W 关闭右侧窗格，而不是活动的主窗格。
+    await inspect('click',{url:origin+'/split-right',x:20,y:20}); await waitState(s=>s.focusedPaneID===rightID);
+    await press(await remote(origin+'/split-right'),'W',['meta']);
+    await waitState(s=>!s.splitID&&s.activeID===leftID&&!s.tabs.some(tab=>tab.id===rightID));
+  });
+  await t.test('Reader stays bound to its source tab across unrelated background navigation and close',async()=>{
+    await invoke('new-tab',{url:origin+'/reader-valid'}); await remote(origin+'/reader-valid');
+    const sourceTab=(await inspect('state')).tabs.find(tab=>tab.url===origin+'/reader-valid');
+    await invoke('new-tab',{url:origin+'/reader-follow'}); await remote(origin+'/reader-follow');
+    const backgroundTab=(await inspect('state')).tabs.find(tab=>tab.url===origin+'/reader-follow');
+    await invoke('select-tab',{id:sourceTab.id}); await waitState(s=>s.activeID===sourceTab.id);
+    await invoke('reader'); await waitState(s=>s.reader===true);
+    // 无关后台标签页的导航与关闭不能打断文章，文章仍可查找/打印。
+    await invoke('navigate',{input:origin+'/reader-follow?background',tabID:backgroundTab.id});
+    await waitState(s=>s.reader===true);
+    assert.deepEqual(await inspect('print-target'),{targetKind:'reader',targetID:'reader'});
+    await invoke('find',{query:'Paragraph 3'}); await waitState(s=>s.find?.targetKind==='reader'&&s.find.matches===1);
+    await invoke('find',{query:''}); await waitState(s=>!s.find);
+    await invoke('close-tab',{id:backgroundTab.id});
+    await waitState(s=>s.reader===true&&!s.tabs.some(tab=>tab.id===backgroundTab.id));
+    // 来源标签页导航才退出文章。
+    await invoke('navigate',{input:origin+'/reader-valid?moved',tabID:sourceTab.id});
+    await waitState(s=>s.reader===false);
+    // 来源标签页被关闭也退出文章。
+    await invoke('select-tab',{id:sourceTab.id}); await waitState(s=>s.activeID===sourceTab.id);
+    await invoke('reader'); await waitState(s=>s.reader===true);
+    await invoke('close-tab',{id:sourceTab.id}); await waitState(s=>s.reader===false);
+  });
+  await t.test('Peek navigation and form state survive promotion without another request',async()=>{
+    await invoke('peek',{url:origin+'/peek-state'}); const first=await remote(origin+'/peek-state');
+    await first.click('#next'); const second=await remote(origin+'/peek-next');
+    await second.locator('#peek-field').fill('kept through promotion');
+    const before=requestCounts.get('/peek-next'),loadedAt=await second.evaluate(()=>window.loadedAt);
+    await invoke('peek-to-tab'); await waitState(s=>!s.peek&&s.tabs.some(tab=>tab.url===origin+'/peek-next'&&tab.id===s.activeID));
+    assert.equal(await second.evaluate(()=>window.loadedAt),loadedAt);
+    assert.equal(await second.locator('#peek-field').inputValue(),'kept through promotion');
+    assert.equal(requestCounts.get('/peek-next'),before,'promotion must transfer the live WebContents without reloading');
+  });
+  await t.test('Reader extraction failure stays off and the article itself is the find and print target',async()=>{
+    await invoke('new-tab',{url:origin+'/reader-invalid'}); await remote(origin+'/reader-invalid');
+    await assert.rejects(()=>invoke('reader'),/无法生成阅读视图/); await waitState(s=>s.reader===false);
+    await invoke('navigate',{input:origin+'/reader-valid'}); await remote(origin+'/reader-valid');
+    const article=await invoke('reader'); assert.equal(article.title,'Reader Fixture'); await waitState(s=>s.reader===true);
+    // 查找和打印必须作用于文章，而不是被隐藏的底层网页。
+    assert.deepEqual(await inspect('print-target'),{targetKind:'reader',targetID:'reader'});
+    await invoke('find',{query:'Paragraph 3'}); await waitState(s=>s.find?.targetKind==='reader'&&s.find.matches===1);
+    await invoke('find',{query:''}); await waitState(s=>!s.find);
+    assert.equal((await inspect('views')).every(view=>view.visible===false||!view.url.startsWith(origin)),true,'the underlying page stays hidden while the reader is open');
+    await invoke('reader'); await waitState(s=>s.reader===false);
+    assert.equal((await inspect('views')).filter(view=>view.visible).length,1);
+  });
+  await t.test('find targets Peek, reports matches and clears safely',async()=>{
+    await invoke('new-tab',{url:origin+'/second'}); await remote(origin+'/second');
+    await invoke('find',{query:'Second'}); await waitState(s=>s.find?.targetKind==='tab'&&s.find.matches>0);
+    await invoke('peek',{url:origin+'/second'}); await remote(origin+'/second');
+    await invoke('find',{query:'Second'}); await waitState(s=>s.find?.targetKind==='peek'&&s.find.matches>0);
+    await invoke('find',{query:''}); await waitState(s=>!s.find);
+    await invoke('close-peek'); await waitState(s=>!s.peek&&!s.find);
+  });
+  await t.test('exact shortcut and link modifiers avoid double execution and preserve native clicks',async()=>{
+    await invoke('new-tab',{url:origin+'/shortcut'}); const page=await remote(origin+'/shortcut');
+    let tabCount=(await inspect('state')).tabs.length;
+    await press(page,'T',['meta']); await waitState(s=>s.tabs.length===tabCount+1);
+    await invoke('close-tab',{id:(await inspect('state')).activeID});
+    await waitState(s=>s.tabs.length===tabCount&&s.tabs.some(tab=>tab.url===origin+'/shortcut'));
+    await page.click('#peek-link',{modifiers:['Shift']}); await waitState(s=>!!s.peek);
+    const peekPage=await remote(origin+'/shortcut-target'); await press(peekPage,'W',['meta']);
+    await waitState(s=>!s.peek&&s.tabs.some(tab=>tab.url===origin+'/shortcut'));
+    await page.click('#peek-link',{modifiers:['Shift','Meta']});
+    await waitState(s=>!s.peek&&s.tabs.filter(tab=>tab.url===origin+'/shortcut-target').length===1);
+    tabCount=(await inspect('state')).tabs.length;
+    await page.click('#peek-link',{button:'middle'});
+    await waitState(s=>s.tabs.length===tabCount+1&&!s.peek);
+  });
+  await t.test('a native passkey request stays pending and is cancellable from the shell',async()=>{
+    const url=origin.replace('127.0.0.1','localhost')+'/second';
+    await invoke('new-tab',{url}); const page=await remote(url), pageOrigin=new URL(url).origin;
+    assert.equal(await page.evaluate(()=>typeof PublicKeyCredential),'function','PublicKeyCredential must stay available');
+    // 真正的标准 get（rpId/allowCredentials/internal hints）：等待状态送到壳层，界面取消结束原 Promise。
+    await page.evaluate(()=>{window.arcoGet={run:options=>{window.arcoGet.outcome=navigator.credentials.get(options).then(()=>({state:'resolved'}),error=>({state:error.name,message:error.message}));}};window.arcoGet.run({publicKey:{challenge:new Uint8Array(16),rpId:'localhost',allowCredentials:[{type:'public-key',id:new Uint8Array(16),transports:['internal']}],timeout:60000}});});
+    await waitState(s=>s.passkeys.length===1&&s.passkeys[0].origin===pageOrigin);
+    const banner=await shell.locator('#passkey-wait').textContent();
+    assert.match(banner,/正在等待通行密钥/); assert.match(banner,/localhost/);
+    await shell.click('[data-passkey-cancel]');
+    const cancelled=await page.evaluate(()=>window.arcoGet.outcome);
+    assert.equal(cancelled.state,'AbortError','the shell cancel must end the original promise');
+    await waitState(s=>s.passkeys.length===0);
+    assert.equal(await shell.locator('#passkey-wait').isHidden(),true);
+    // get 额外带 authenticatorSelection 也不能被 Arco 当成平台限定快速拒绝；调用方 signal 仍可用且不改写。
+    const caller=await page.evaluate(async()=>{
+      const controller=new AbortController();
+      const options=Object.create({publicKey:{challenge:new Uint8Array(16),rpId:'localhost',allowCredentials:[{type:'public-key',id:new Uint8Array(16)}],authenticatorSelection:{authenticatorAttachment:'platform'}}});
+      options.signal=controller.signal;
+      const outcome=navigator.credentials.get(options).then(()=>({state:'resolved'}),error=>({state:error.name,message:error.message}));
+      const started=performance.now();
+      while(performance.now()-started<1500){const current=await Promise.race([outcome,new Promise(resolve=>setTimeout(()=>resolve(null),100))]);if(current)return {...current,inherited:!!options.publicKey,waited:true};}
+      controller.abort();
+      const aborted=await outcome;
+      return {...aborted,inherited:!!options.publicKey,waited:false};
+    });
+    assert.equal(caller.inherited,true,'inherited dictionary properties must reach the native call');
+    assert.notEqual(caller.state,'resolved');
+    assert.equal(/此版本的 Arco/.test(caller.message||''),false,'get must not be rejected by the create-only platform rule');
+    await waitState(s=>s.passkeys.length===0);
+    // 导航后旧文档的等待状态必须清除；取消只作用于该文档。
+    await page.evaluate(()=>window.arcoGet.run({publicKey:{challenge:new Uint8Array(16),rpId:'localhost',allowCredentials:[{type:'public-key',id:new Uint8Array(16)}],timeout:60000}}));
+    await waitState(s=>s.passkeys.length===1);
+    await invoke('navigate',{input:url}); await remote(url);
+    await waitState(s=>s.passkeys.length===0);
+    assert.equal(await shell.locator('#passkey-wait').isHidden(),true);
+    // 非 publicKey 的 get 不拦截，也不产生等待状态。
+    const plain=await page.evaluate(()=>navigator.credentials.get({}).then(()=>({state:'resolved'}),error=>({state:error.name})));
+    assert.notEqual(plain.state,'resolved');
+    await waitState(s=>s.passkeys.length===0);
+  });
+  await t.test('sized popups keep their owner for downloads and scoped permission requests',async()=>{
+    await invoke('new-tab',{url:origin+'/popup-owner'}); const owner=await remote(origin+'/popup-owner');
+    await owner.click('#open-download'); const downloadPopup=await remote(origin+'/popup-download');
+    let owners=await inspect('popup-owners'); assert.equal(owners.length,1); assert.equal(owners[0].private,false);
+    await downloadPopup.click('#download'); await waitState(s=>s.downloads.some(item=>item.filename==='arco-popup.txt'&&item.state==='completed'));
+    await downloadPopup.close(); await assertEventually(async()=>(await inspect('popup-owners')).length===0);
+    await owner.click('#open-permission'); const permissionPopup=await remote(origin+'/popup-permission');
+    owners=await inspect('popup-owners'); assert.equal(owners.length,1); assert.equal(owners[0].partition,'persist:arco');
+    await permissionPopup.click('#ask'); await assertEventually(async()=>(await permissionPopup.locator('#result').textContent())==='granted');
+    await permissionPopup.close(); await assertEventually(async()=>(await inspect('popup-owners')).length===0);
+  });
+  await t.test('HTTP Basic login submits once, cancels, closes and keeps popup and private owners independent',async()=>{
+    await invoke('new-tab',{url:origin+'/basic-tab'});
+    await shell.locator('#http-auth-form').waitFor({state:'visible'});
+    await shell.locator('#http-auth-form [name="username"]').fill('tab-user');
+    await shell.locator('#http-auth-form [name="password"]').fill('tab-secret');
+    await shell.getByRole('button',{name:'登录',exact:true}).click();
+    const authenticated=await remote(origin+'/basic-tab'); await authenticated.waitForFunction(()=>document.title==='Authenticated tab-user');
+    await waitState(s=>!s.httpAuth);
+    await invoke('new-tab',{url:origin+'/basic-cancel'});
+    await shell.locator('#http-auth-form').waitFor({state:'visible'});
+    await shell.getByRole('button',{name:'取消',exact:true}).click(); await waitState(s=>!s.httpAuth);
+    await invoke('new-tab',{url:origin+'/basic-close'});
+    await shell.locator('#http-auth-form').waitFor({state:'visible'});
+    const closingID=(await inspect('state')).activeID; await invoke('close-tab',{id:closingID});
+    await waitState(s=>!s.httpAuth); assert.equal((await inspect('auth-queue')).length,0);
+    await invoke('new-tab',{url:origin+'/popup-owner'}); const owner=await remote(origin+'/popup-owner');
+    // 401 响应提交前弹窗还没有完成导航，Playwright 只在提交后才列出该页面目标。
+    await owner.click('#open-auth');
+    await shell.locator('#http-auth-form').waitFor({state:'visible'});
+    await shell.locator('#http-auth-form [name="username"]').fill('popup-user');
+    await shell.locator('#http-auth-form [name="password"]').fill('popup-secret');
+    await shell.getByRole('button',{name:'登录',exact:true}).click();
+    const popupAuthenticated=await remote(origin+'/basic-popup'); await popupAuthenticated.waitForFunction(()=>document.title==='Authenticated popup-user');
+    await popupAuthenticated.close();
+    await invoke('private-window'); let privateShell;
+    await assertEventually(async()=>{privateShell=(await app.windows()).find(page=>page!==shell&&/shell\.html$/.test(page.url()));return !!privateShell;});
+    // 401 导航要等用户提交认证才完成：先启动导航，交互后再 await，避免测试自己卡住。
+    const privateNavigation=invoke('navigate',{input:origin+'/basic-private'},privateShell).catch(()=>null);
+    await privateShell.locator('#http-auth-form').waitFor({state:'visible'});
+    await privateShell.locator('#http-auth-form [name="username"]').fill('private-user');
+    await privateShell.locator('#http-auth-form [name="password"]').fill('private-secret');
+    await privateShell.getByRole('button',{name:'登录',exact:true}).click();
+    const privatePage=await remote(origin+'/basic-private'); await privatePage.waitForFunction(()=>document.title==='Authenticated private-user');
+    await privateNavigation;
+    const closed=privateShell.waitForEvent('close'); await Promise.all([closed,inspect('close-window',{},privateShell).catch(()=>closed)]);
+    // Chromium 会按来源重放已知凭据（浏览器正常行为，不禁用）。真实服务端只应在三处接受登录：
+    // 每个导航恰好质询一次（401），取消/关闭后再也没有成功认证，说明回调各完成一次。
+    for(const path of ['/basic-tab','/basic-cancel','/basic-close','/basic-popup','/basic-private'])assert.equal(authChallenges.filter(x=>x.path===path).length,1,path+' must be challenged exactly once');
+    assert.deepEqual(authSuccesses.map(x=>[x.path,x.username]),[['/basic-tab','tab-user'],['/basic-popup','popup-user'],['/basic-private','private-user']]);
+    // 关掉本子测试创建的认证页，避免重启后恢复出新的认证提示影响后续用例。
+    for(const tab of (await inspect('state')).tabs.filter(tab=>tab.url&&tab.url.includes('/basic-')))await invoke('close-tab',{id:tab.id});
+    await waitState(s=>s.tabs.every(tab=>!tab.url.includes('/basic-')));
+  });
   await t.test('submitted login save, whitespace secret and wrong-origin refusal',async()=>{
+    // 前面子测试可能留下了别的活动标签页；填充必须针对可见标签页。
+    await invoke('select-tab',{id:(await inspect('state')).tabs.find(tab=>tab.url===origin+'/login-work').id});
     const page=await remote(origin+'/login-work');await page.locator('input[type=password]').fill('  test-only-password  ');await page.locator('button[type=submit]').click();
     await shell.locator('[data-action="capture-save"]').waitFor({state:'visible'}); await shell.locator('[data-action="capture-save"]').click();
     await waitState(s=>!s.capture); const credentials=await invoke('credentials');assert.equal(credentials.length,1);
@@ -352,33 +610,38 @@ test('a Chrome Web Store package installs through the settings UI',{timeout:6000
   fs.writeFileSync(path.join(build,'ext','options.html'),'<!doctype html><title>Fixture Options</title><h1 id="options-page">Extension options</h1><a id="own-link" href="next.html">Next</a><a id="new-link" href="next.html" target="_blank">New tab</a>');
   fs.writeFileSync(path.join(build,'ext','next.html'),'<!doctype html><title>Fixture Next</title><h1 id="next-page">Next extension page</h1>');
   fs.writeFileSync(path.join(build,'ext','icon.png'),Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==','base64'));
-  fs.writeFileSync(path.join(build,'ext','cs.js'),'document.documentElement.dataset.arcoStore="1";');
+  fs.writeFileSync(path.join(build,'ext','cs.js'),'document.documentElement.dataset.arcoStore = chrome.runtime.id;');
   const { execFileSync } = require('node:child_process');
   execFileSync('/usr/bin/zip',['-q','-r',path.join(build,'pack.zip'),'.'],{cwd:path.join(build,'ext')});
-  const head=Buffer.alloc(12);head.write('Cr24',0,'binary');head.writeUInt32LE(3,4);head.writeUInt32LE(4,8);
-  const payload=Buffer.concat([head,Buffer.from('sig!'),fs.readFileSync(path.join(build,'pack.zip'))]);
+  // 商店 fixture 也必须是真签名包：Arco 只接受签名、期望 ID 与 zip 字节绑定一致的 crx。
+  const fixtureKeys=require('./crx-fixture').generateKeyPair();
+  const storeID=fixtureKeys.id;
+  const payload=require('./crx-fixture').signedCRX3(fs.readFileSync(path.join(build,'pack.zip')),fixtureKeys);
   const store=http.createServer((request,response)=>{
     if(request.url.startsWith('/page')){ response.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}); return response.end('<title>Fixture</title><h1>Fixture</h1>'); }
     response.writeHead(200,{'Content-Type':'application/x-chrome-extension'}); response.end(payload);
   });
   await new Promise(resolve=>store.listen(0,'127.0.0.1',resolve));
   const pageOrigin=`http://127.0.0.1:${store.address().port}`;
+  const launchEnv={...process.env,ARCO_TEST_MODE:'1',ARCO_USER_DATA_DIR:folder,ARCO_CRX_ORIGIN:`http://127.0.0.1:${store.address().port}`};
   let instance=null;
   try{
-    instance=await electron.launch({args:[root],env:{...process.env,ARCO_TEST_MODE:'1',ARCO_USER_DATA_DIR:folder,ARCO_CRX_ORIGIN:`http://127.0.0.1:${store.address().port}`},timeout:15000});
+    instance=await electron.launch({args:[root],env:launchEnv,timeout:15000});
     let page=null;
     for(let i=0;i<200&&!page;i++){page=(await instance.windows()).find(p=>/shell\.html$/.test(p.url()));if(!page)await new Promise(r=>setTimeout(r,50));}
     page.setDefaultTimeout(8000);await page.waitForFunction(()=>!!window.arco&&!!document.querySelector('#favorites .favorite-add'));
     if(await page.$('[data-onboarding]')){await page.click('[data-action="onboard-skip"]');await page.waitForFunction(()=>!document.querySelector('[data-onboarding]'));}
     await page.click('[data-action="settings"]');await page.click('[data-settings-section="extensions"]');
-    await page.fill('#store-input','https://chromewebstore.google.com/detail/fixture/eimadpbcbfnmbkopoojfekhnkhdbieeh?hl=zh-CN');
+    await page.fill('#store-input',`https://chromewebstore.google.com/detail/fixture/${storeID}?hl=zh-CN`);
     await page.click('[data-action="install-store-input"]');
     await page.waitForFunction(()=>/Arco Store Fixture/.test(document.querySelector('#extension-list')?.textContent||''));
     const state=await page.evaluate(()=>window.arco.invoke('arco:test',{action:'state'}));
     assert.equal(state.settings.extensions.length,1);
-    assert.equal(state.settings.extensions[0].storeID,'eimadpbcbfnmbkopoojfekhnkhdbieeh');
-    assert(fs.existsSync(path.join(folder,'Extensions','eimadpbcbfnmbkopoojfekhnkhdbieeh','cs.js')));
-    await page.fill('#store-input','https://example.com/detail/x/eimadpbcbfnmbkopoojfekhnkhdbieeh');
+    assert.equal(state.settings.extensions[0].storeID,storeID);
+    assert.equal(state.settings.extensions[0].id,storeID,'the loaded extension id must equal the requested store id');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(folder,'Extensions',storeID,'manifest.json'),'utf8')).key,fixtureKeys.publicKey.toString('base64'),'the authenticated developer key must be written when the package omits manifest.key');
+    assert(fs.existsSync(path.join(folder,'Extensions',storeID,'cs.js')));
+    await page.fill('#store-input',`https://example.com/detail/x/${storeID}`);
     await page.click('[data-action="install-store-input"]');
     await page.waitForFunction(()=>/只支持 Chrome 应用商店/.test(document.querySelector('#toast')?.textContent||''));
     // 工具栏的扩展入口（空白标签页不显示工具栏，先打开一个网页）：图标栏 + 启用/停用
@@ -395,6 +658,9 @@ test('a Chrome Web Store package installs through the settings UI',{timeout:6000
     assert.equal((await page.evaluate(()=>window.arco.invoke('arco:test',{action:'state'}))).settings.extensions[0].enabled,false);
     await page.click('[data-extension-toggle]');
     await page.waitForFunction(()=>/已启用/.test(document.querySelector('#extensions-body')?.textContent||''));
+    const reenabled=await page.evaluate(()=>window.arco.invoke('arco:test',{action:'state'}));
+    assert.equal(reenabled.settings.extensions[0].enabled,true);
+    assert.equal(reenabled.settings.extensions[0].id,storeID,'re-enabling must keep the requested id');
     // 核心链路：点扩展自己的图标 → 它的 chrome.action.onClicked → 它自己的 chrome.windows.create
     await page.waitForFunction(()=>{const list=document.querySelector('browser-action-list');return !!(list&&list.shadowRoot&&list.shadowRoot.querySelector('button'));});
     await page.waitForFunction(()=>{const button=document.querySelector('browser-action-list')?.shadowRoot?.querySelector('button');return button?.style.backgroundImage.includes('crx:');});
@@ -436,7 +702,23 @@ test('a Chrome Web Store package installs through the settings UI',{timeout:6000
     await assertEventually(async()=>{const current=await page.evaluate(()=>window.arco.invoke('arco:test',{action:'state'}));return current.tabs.filter(tab=>/\/next\.html$/.test(tab.url)).length===3;});
     await page.waitForFunction(()=>document.querySelector('#overlay-root').hidden);
     const ordinaryPage = (await instance.windows()).find(w=>w.url()===pageOrigin+'/page');
+    assert.equal(await ordinaryPage.evaluate(()=>document.documentElement.dataset.arcoStore),storeID,'chrome.runtime.id must equal the requested store id');
     assert.equal(await ordinaryPage.evaluate(url=>!!window.open(url), tool.url()), false, 'Ordinary websites must not open private extension pages');
+    // 重启后仍是同一身份：manifest.key 已固定，实际 chrome.runtime.id 等于请求 ID。
+    await instance.close().catch(()=>{}); instance=null;
+    instance=await electron.launch({args:[root],env:launchEnv,timeout:15000});
+    page=null;
+    for(let i=0;i<200&&!page;i++){page=(await instance.windows()).find(p=>/shell\.html$/.test(p.url()));if(!page)await new Promise(r=>setTimeout(r,50));}
+    page.setDefaultTimeout(8000);await page.waitForFunction(()=>!!window.arco&&!!document.querySelector('#space-name')?.textContent);
+    const restarted=await page.evaluate(()=>window.arco.invoke('arco:test',{action:'state'}));
+    assert.equal(restarted.settings.extensions.length,1);
+    assert.equal(restarted.settings.extensions[0].id,storeID,'restart must keep the requested id');
+    const restartedList=await page.evaluate(()=>window.arco.invoke('arco:invoke',{channel:'extension-list'}));
+    assert.equal(restartedList.find(item=>item.id===storeID)?.enabled,true);
+    await page.evaluate(o=>window.arco.invoke('arco:invoke',{channel:'new-tab',payload:{url:o}}),pageOrigin+'/page');
+    const restored=(await instance.windows()).find(w=>w.url()===pageOrigin+'/page');
+    await restored.waitForFunction(()=>!!document.documentElement.dataset.arcoStore);
+    assert.equal(await restored.evaluate(()=>document.documentElement.dataset.arcoStore),storeID,'chrome.runtime.id must stay the requested store id after restart');
   } finally {
     await instance?.close().catch(()=>{});
     await new Promise(resolve=>store.close(resolve));
