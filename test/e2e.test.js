@@ -482,7 +482,9 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     assert.equal(state.tabs.some(x=>x.url===origin+'/reopen-check'),false);
     await invoke('reopen-tab'); await waitState(s=>s.tabs.some(t=>t.url===origin+'/reopen-check'));
     assert.equal(state.allBookmarks.filter(x=>x.title==='持久化书签').length,1);
-    assert(state.favorites.some(item=>item.title==='常驻测试'&&item.favicon===origin+'/ui-icon.svg'));
+    // 图标会在主进程缓存成 data URL（站点图标地址以后失效也不影响显示），两种形式都必须来自站点真实图标。
+    const shortcut=state.favorites.find(item=>item.title==='常驻测试');
+    assert(shortcut && (shortcut.favicon===origin+'/ui-icon.svg' || (shortcut.favicon.startsWith('data:image/svg+xml;base64,') && Buffer.from(shortcut.favicon.split(',')[1],'base64').toString('utf8').includes('<svg'))), 'the shortcut must keep the site icon');
     await shell.getByRole('button',{name:'常驻测试',exact:true}).waitFor({state:'visible'});
     // 三方登录弹窗：window.open 必须是真的弹窗窗口，window.opener 才能收到 postMessage
     await invoke('new-tab',{url:origin+'/oauth-start'});

@@ -95,9 +95,18 @@ class Library {
       const url = core.webURL(value.url), existing = data.favorites.find(item => item.url === url);
       if (existing) return existing;
       const title = core.text(value.title || new URL(url).hostname, 500) || new URL(url).hostname;
-      const suppliedIcon = typeof value.favicon === 'string' && /^https?:\/\//.test(value.favicon) ? core.webURL(value.favicon) : '';
+      const suppliedIcon = typeof value.favicon === 'string' && /^https?:\/\//.test(value.favicon) ? core.webURL(value.favicon) : typeof value.favicon === 'string' && value.favicon.length <= 350000 && /^data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/i.test(value.favicon) ? value.favicon : '';
       const item = core.stamp({ id: core.id(), title, url, favicon: suppliedIcon || new URL(url).origin + '/favicon.ico' });
       data.favorites.push(item); core.reorder(data.favorites); return item;
+    });
+  }
+  // 图标字节缓存：地址失效时由主进程重新解析后写回，界面不需要再依赖外部站点。
+  setFavoriteIcon(url, favicon) {
+    const current = this.data.favorites.find(item => item.url === url);
+    if (!current || current.favicon === favicon) return current || null;
+    return this.commit(data => {
+      const item = data.favorites.find(x => x.url === url); if (!item) return null;
+      item.favicon = String(favicon || '').slice(0, 350000); item.updatedAt = core.now(); return item;
     });
   }
   addFolder(value) {

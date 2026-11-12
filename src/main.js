@@ -324,7 +324,7 @@ function attachTab(tab, initialExtensionID = '') {
   wc.on('did-navigate', (_, url) => { tab.url = url; sendState(win); saveSession(); });
   wc.on('did-navigate-in-page', (_, url, isMainFrame) => { if (isMainFrame) { tab.url = url; recordHistory(tab); offerStoreInstall(tab); sendState(win); saveSession(); } });
   wc.on('page-title-updated', (event, title) => { event.preventDefault(); tab.title = title.slice(0, 1000) || '新标签页'; sendState(win); });
-  wc.on('page-favicon-updated', (_, icons) => { tab.favicon = icons[0] || ''; sendState(win); });
+  wc.on('page-favicon-updated', (_, icons) => { tab.favicon = icons[0] || ''; if (!win.private && tab.favicon) adoptFavoriteIcon(tab); sendState(win); });
   wc.on('did-finish-load', () => { tab.url = wc.getURL(); recordHistory(tab); offerStoreInstall(tab); sendState(win); });
   wc.on('did-start-loading', () => sendState(win)); wc.on('did-stop-loading', () => sendState(win));
   wc.on('audio-state-changed', () => sendState(win));
@@ -711,7 +711,74 @@ function setupSession(ses) {
     broadcast();
   });
 }
-const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'migrate-browser-data', 'import-browser', 'chrome-extensions', 'import-chrome-extensions', 'install-extension-store', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-delete', 'download-open', 'download-reveal', 'download-cancel', 'download-pause', 'download-resume', 'find', 'find-stop', 'passkey-cancel', 'http-auth-submit', 'http-auth-cancel', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'open-system-passwords', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'extension-list', 'extension-toggle', 'extension-popup', 'copy', 'menu', 'confirm-clear']);
+// 常驻网站的图标只存地址会被网站的 404/204/防盗链拖死，所以取到字节后存成 data URL；
+// 地址失效时再从首页的 <link rel="icon"> 重新解析一次。
+// 站点（尤其 Cloudflare 前置的）会按 UA 拦截 Electron 默认 UA，取图标时用去掉 Electron 标记的浏览器 UA。
+const iconUserAgent = () => session.fromPartition(normalSession).getUserAgent().replace(/\sElectron\/[\d.]+/i, '');
+const iconFetch = (url, init = {}) => session.fromPartition(normalSession).fetch(url, { ...init, headers: { ...init.headers, 'User-Agent': iconUserAgent() } });
+const ICON_MAX = 256 * 1024, ICON_TYPES = /^image\/(png|jpeg|gif|webp|svg\+xml|x-icon|vnd\.microsoft\.icon|bmp|avif)$/;
+// 有些站点会用 image/* 的内容类型返回错误页，按魔数确认真的是图片，避免把 HTML 缓存成图标。
+function looksLikeImage(type, bytes) {
+  const head = bytes.subarray(0, 16), text = bytes.subarray(0, 1024).toString('utf8');
+  if (type === 'image/png') return head[0] === 0x89 && head.subarray(1, 4).toString('latin1') === 'PNG';
+  if (type === 'image/jpeg') return head[0] === 0xff && head[1] === 0xd8;
+  if (type === 'image/gif') return head.subarray(0, 3).toString('latin1') === 'GIF';
+  if (type === 'image/webp') return head.subarray(0, 4).toString('latin1') === 'RIFF' && head.subarray(8, 12).toString('latin1') === 'WEBP';
+  if (type === 'image/bmp') return head.subarray(0, 2).toString('latin1') === 'BM';
+  if (type === 'image/avif') return head.subarray(4, 8).toString('latin1') === 'ftyp';
+  if (/x-icon|vnd\.microsoft\.icon/.test(type)) return head[0] === 0 && head[1] === 0 && (head[2] === 1 || head[2] === 2) && head[3] === 0;
+  if (type === 'image/svg+xml') return /<svg[\s>]/i.test(text);
+  return false;
+}
+async function iconData(raw) {
+  if (typeof raw !== 'string') return '';
+  if (/^data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/i.test(raw)) return raw.length <= ICON_MAX * 2 ? raw : '';
+  if (!/^https?:\/\//.test(raw)) return '';
+  try {
+    const response = await iconFetch(raw, { redirect: 'follow', signal: AbortSignal.timeout(6000) });
+    if (!response.ok) return '';
+    const type = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!ICON_TYPES.test(type)) return '';
+    const bytes = Buffer.from(await response.arrayBuffer());
+    return bytes.length && bytes.length <= ICON_MAX && looksLikeImage(type, bytes) ? `data:${type};base64,${bytes.toString('base64')}` : '';
+  } catch { return ''; }
+}
+async function favoriteIcons(favorite) {
+  const candidates = [favorite.favicon, new URL(favorite.url).origin + '/favicon.ico'];
+  try {
+    // 用文档导航的请求头取首页：部分站点（Cloudflare 前置）会按 Sec-Fetch-* 判浏览器请求。
+    const response = await iconFetch(favorite.url, { signal: AbortSignal.timeout(6000), headers: { Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Site': 'none', 'Upgrade-Insecure-Requests': '1' } });
+    if (response.ok) {
+      const html = (await response.text()).slice(0, 512 * 1024);
+      for (const tag of html.matchAll(/<link[^>]+rel=["']?[^"'>]*icon[^"'>]*["']?[^>]*>/gi)) {
+        const href = tag[0].match(/href=["']([^"']+)["']/i)?.[1];
+        if (href) candidates.push(new URL(href, favorite.url).href);
+      }
+    }
+  } catch {}
+  return candidates.filter((value, index, all) => value && all.indexOf(value) === index);
+}
+async function cacheFavoriteIcon(favorite) {
+  if (!favorite) return false;
+  const stored = library.data.favorites.find(item => item.url === favorite.url);
+  if (!stored || stored.favicon?.startsWith('data:image/')) return false;
+  for (const candidate of await favoriteIcons(favorite)) {
+    const data = await iconData(candidate);
+    if (!data) continue;
+    if (data !== stored.favicon) library.setFavoriteIcon(favorite.url, data);
+    broadcast(); return true;
+  }
+  return false;
+}
+// 只修真正加载失败的图标：渲染层报告过失败的常驻网站，在页面自己声明图标（含 data URL）时用最准确的来源重试一次。
+const brokenIcons = new Set(), iconAttempts = new Set();
+function adoptFavoriteIcon(tab) {
+  const favorite = library.data.favorites.find(item => item.url === tab.url && brokenIcons.has(item.id) && !item.favicon?.startsWith('data:'));
+  if (!favorite || iconAttempts.has(favorite.id)) return;
+  iconAttempts.add(favorite.id);
+  cacheFavoriteIcon({ ...favorite, favicon: tab.favicon }).catch(() => {});
+}
+const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'refresh-favorite-icon', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'migrate-browser-data', 'import-browser', 'chrome-extensions', 'import-chrome-extensions', 'install-extension-store', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-delete', 'download-open', 'download-reveal', 'download-cancel', 'download-pause', 'download-resume', 'find', 'find-stop', 'passkey-cancel', 'http-auth-submit', 'http-auth-cancel', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'open-system-passwords', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'extension-list', 'extension-toggle', 'extension-popup', 'copy', 'menu', 'confirm-clear']);
 function trustedWindow(event) {
   const win = [...windows].find(w => w.shell.webContents === event.sender);
   if (!win || event.senderFrame !== win.shell.webContents.mainFrame || event.senderFrame.url !== pathToFileURL(path.join(__dirname, 'shell.html')).href) error('未授权的界面请求');
@@ -788,7 +855,8 @@ ipcMain.handle('arco:invoke', async (event, message) => {
       case 'add-bookmark': library.addBookmark({ ...a, spaceID: a.spaceID || win.spaceID }); broadcast(); break;
       case 'update-bookmark': library.updateBookmark(a); broadcast(); break;
       case 'delete-bookmark': library.deleteBookmark(bounded(a.id, 128)); broadcast(); break;
-      case 'add-favorite': { const url=core.webURL(a.url), tab=[...win.tabs.values()].find(t=>t.url===url);const item=library.addFavorite({...a,url,favicon:tab?.favicon || ''});broadcast();return item; }
+      case 'add-favorite': { const url=core.webURL(a.url), tab=[...win.tabs.values()].find(t=>t.url===url);const item=library.addFavorite({...a,url,favicon:tab?.favicon || ''});broadcast();cacheFavoriteIcon(item).catch(()=>{});return item; }
+      case 'refresh-favorite-icon': { const favorite=library.data.favorites.find(x=>x.id===bounded(a.id,128)); if (favorite) { brokenIcons.add(favorite.id); await cacheFavoriteIcon(favorite); } break; }
       case 'add-folder': library.addFolder({ ...a, spaceID: a.spaceID || win.spaceID }); broadcast(); break;
       case 'update-folder': library.updateFolder(a); broadcast(); break;
       case 'delete-folder': library.deleteFolder(bounded(a.id, 128), !!a.removeContents); broadcast(); break;

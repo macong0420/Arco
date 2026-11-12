@@ -8,8 +8,10 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 const attr = esc;
 const icon = (name, cls = '') => `<svg class="${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const button = (label, action, cls = 'button') => `<button class="${cls}" data-action="${action}">${label}</button>`;
-const favicon = (item, fallback = 'globe') => item.favicon && /^https?:\/\//.test(item.favicon) ? `<img src="${attr(item.favicon)}" alt="" data-favicon>` : icon(fallback);
-document.addEventListener('error', event => { const img=event.target; if(img instanceof HTMLImageElement && img.hasAttribute('data-favicon')) { const holder=document.createElement('span');holder.innerHTML=icon('globe');img.replaceWith(holder.firstElementChild); } },true);
+const favicon = (item, fallback = 'globe') => item.favicon && /^(https?:\/\/|data:image\/)/.test(item.favicon) ? `<img src="${attr(item.favicon)}" alt="" data-favicon>` : icon(fallback);
+// 图标地址失效（404/防盗链）时只重解析一次：主进程取回真实字节写回书库并广播，不会无限重试。
+const refreshedIcons = new Set();
+document.addEventListener('error', event => { const img=event.target; if(!(img instanceof HTMLImageElement) || !img.hasAttribute('data-favicon')) return; const holder=img.closest('[data-favorite-id]'); if(holder && !refreshedIcons.has(holder.dataset.favoriteId)) { refreshedIcons.add(holder.dataset.favoriteId); call('refresh-favorite-icon',{id:holder.dataset.favoriteId},false); } const span=document.createElement('span');span.innerHTML=icon('globe');img.replaceWith(span.firstElementChild); },true);
 const hostname = url => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return '新标签页'; } };
 const activeTab = () => state?.tabs.find(t => t.id === state.activeID);
 function currentSiteHost() {

@@ -166,4 +166,8 @@ test('permanent shortcuts retain real favicons, deduplicate and persist across r
   const repeated=library.addFavorite({title:'Duplicate',url:'https://example.test/'});assert.equal(first.id,repeated.id);assert.equal(library.data.favorites.length,1);
   assert.throws(()=>library.addFavorite({title:'Unsafe',url:'javascript:alert(1)'}),/HTTP/);
   const reopened=new Library(directory,()=>{});assert.equal(reopened.data.favorites[0].favicon,'https://example.test/icon.svg');assert.equal(reopened.data.favorites[0].title,'Example');
+  // 站点用 data URL 做图标时直接保留；图标字节缓存写回后重启仍然生效。
+  const inline=library.addFavorite({title:'Inline',url:'https://inline.test',favicon:'data:image/svg+xml;base64,PHN2Zy8+'});assert.equal(inline.favicon,'data:image/svg+xml;base64,PHN2Zy8+');
+  library.setFavoriteIcon('https://example.test/','data:image/png;base64,iVBORw0KGgo=');
+  assert.equal(new Library(directory,()=>{}).data.favorites.find(x=>x.url==='https://example.test/').favicon,'data:image/png;base64,iVBORw0KGgo=');
 });
