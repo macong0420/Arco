@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function loadBridge(credentials) {
+function loadBridge(credentials, extra = {}) {
   let bridge;
   const listeners = new Map();
   const events = [];
@@ -35,6 +35,8 @@ function loadBridge(credentials) {
     window,
     document: { addEventListener() {}, querySelectorAll() { return []; } },
     getComputedStyle() { return { visibility: 'visible', opacity: '1' }; },
+    DOMException,
+    ...extra,
     require(name) {
       assert.equal(name, 'electron');
       return {
@@ -129,4 +131,49 @@ test('conditional and non-publicKey requests pass through unchanged without wait
   assert.equal(await credentials.get(plain), 'native-result');
   assert.equal(calls.at(-1).options, plain);
   assert.equal(events.filter(event => event.type.startsWith('arco-passkey-')).length, 0);
+});
+
+test('without a platform authenticator a request that never settles is rejected at the deadline', async () => {
+  const calls = [];
+  const timers = [];
+  const credentials = {};
+  calls.credentials = credentials;
+  credentials.get = abortableNative(calls, 'get');
+  const { events } = loadBridge(credentials, {
+    PublicKeyCredential: { isUserVerifyingPlatformAuthenticatorAvailable: () => Promise.resolve(false) },
+    setTimeout: callback => timers.push(callback),
+    clearTimeout: () => {}
+  });
+
+  const pending = credentials.get({ publicKey: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 1, 'the native request is still tried first');
+  assert.equal(timers.length, 1, 'a missing platform authenticator must arm a deadline');
+  timers[0]();
+  await assert.rejects(pending, error => error?.name === 'NotSupportedError');
+  const types = events.map(event => event.type);
+  assert.ok(types.includes('arco-passkey-pending'));
+  assert.ok(types.includes('arco-passkey-unavailable'));
+});
+
+test('a platform authenticator still reaches the native implementation with wait events', async () => {
+  const calls = [];
+  const timers = [];
+  const credentials = {};
+  calls.credentials = credentials;
+  credentials.create = abortableNative(calls, 'create');
+  credentials.get = abortableNative(calls, 'get');
+  const { events } = loadBridge(credentials, {
+    PublicKeyCredential: { isUserVerifyingPlatformAuthenticatorAvailable: () => Promise.resolve(true) },
+    setTimeout: callback => timers.push(callback),
+    clearTimeout: () => {}
+  });
+
+  const pending = credentials.get({ publicKey: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 1);
+  assert.equal(timers.length, 0, 'an available platform authenticator must not be cut off');
+  calls.resolve('assertion');
+  assert.equal(await pending, 'assertion');
+  assert.deepEqual(events.map(event => event.type), ['arco-passkey-pending', 'arco-passkey-settled']);
 });

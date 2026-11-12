@@ -524,6 +524,7 @@ api.onState(value => { state = value; render(); });
 api.onCommand(command => { if (actions[command]) actions[command](); });
 api.onEditBookmark(item => showModal('edit-bookmark', item));
 api.onEditFolder(item => showModal('folder', item));
+api.onPasskeyUnavailable(() => toast('Arco 没有可用的系统通行密钥，请改用密码登录'));
 document.addEventListener('contextmenu', event => { const tab=event.target.closest('[data-tab-row]'), bookmark=event.target.closest('[data-bookmark-id]'), folder=event.target.closest('[data-folder]'); const item=tab||bookmark||folder;if(!item)return;event.preventDefault();call('item-menu',{kind:tab?'tab':bookmark?'bookmark':'folder',id:tab?.dataset.tabRow||bookmark?.dataset.bookmarkId||folder?.dataset.folder}); });
 matchMedia('(prefers-color-scheme:dark)').addEventListener('change', render);
 window.addEventListener('beforeunload', () => { if (modal === 'find') call('find-stop'); });

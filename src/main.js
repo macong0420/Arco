@@ -1105,6 +1105,14 @@ ipcMain.on('arco:passkey-pending', (event, payload) => {
   passkeyRequests.set(key, { key, win, wc, id: core.id(), pageID: id, origin, generation: passkeyDocuments.get(wc) || 0 });
   sendState(win);
 });
+// 平台认证器缺失时页面到点会收到 NotSupportedError；这里只负责告诉用户改用密码，5 秒内不重复提示。
+ipcMain.on('arco:passkey-unavailable', event => {
+  const wc = event.sender, win = ownerForWebContents(wc);
+  if (!win || win.isDestroyed() || wc.isDestroyed() || event.senderFrame !== wc.mainFrame) return;
+  if (Date.now() - (win.passkeyHintAt || 0) < 5000) return;
+  win.passkeyHintAt = Date.now();
+  if (!win.shell.webContents.isDestroyed()) win.shell.webContents.send('arco:passkey-unavailable');
+});
 ipcMain.on('arco:passkey-settled', (event, payload) => {
   const wc = event.sender, id = payload?.id;
   if (wc.isDestroyed() || event.senderFrame !== wc.mainFrame || typeof id !== 'string' || !id || id.length > 128) return;

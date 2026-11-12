@@ -18,8 +18,8 @@ test('real WebAuthn stays native while Arco scopes cancellable wait state', { ti
     response.end('<!doctype html><title>Passkey fixture</title><h1>Passkey fixture</h1>');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  const origin = `http://127.0.0.1:${server.address().port}`;
-  const alternateOrigin = origin.replace('127.0.0.1', 'localhost');
+  const origin = `http://localhost:${server.address().port}`;
+  const alternateOrigin = origin.replace('localhost', '127.0.0.1');
   let app = null;
 
   t.after(async () => {
