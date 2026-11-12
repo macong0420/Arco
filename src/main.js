@@ -658,6 +658,7 @@ function handleLogin(event, wc, details, authInfo, callback) {
   queueAuthRequest(win, wc, { origin, host: String(authInfo.host || '').slice(0, 255), port: Number(authInfo.port) || 0, realm: String(authInfo.realm || '').slice(0, 500), proxy: !!authInfo.isProxy, retry: details.firstAuthAttempt === false }, callback);
 }
 function setupSession(ses) {
+  ses.registerPreloadScript({ type: 'frame', filePath: path.join(__dirname, 'gesture-preload.js') });
   const grants = new Set();
   const testGrants = testMode && process.env.ARCO_TEST_PERMISSION_GRANTS ? JSON.parse(process.env.ARCO_TEST_PERMISSION_GRANTS) : [];
   ses.setPermissionRequestHandler((wc, permission, callback, details) => {
@@ -926,7 +927,7 @@ ipcMain.handle('arco:invoke', async (event, message) => {
         const request = win.httpAuthQueue.find(item => item.id === bounded(a.id, 128));
         if (request) finishAuthRequest(request); break;
       }
-      case 'zoom': { const wc = commandTarget(win).wc; wc.setZoomFactor(a.reset ? 1 : Math.max(0.25, Math.min(5, wc.getZoomFactor() + (Number(a.delta) || 0)))); sendState(win); break; }
+      case 'zoom': { const wc = commandTarget(win).wc; if (a.reset) wc.send('arco:reset-visual-zoom'); wc.setZoomFactor(a.reset ? 1 : Math.max(0.25, Math.min(5, wc.getZoomFactor() + (Number(a.delta) || 0)))); sendState(win); break; }
       case 'print': commandTarget(win).wc.print({}); break;
       case 'pdf': { const result = await dialog.showSaveDialog(win, { defaultPath: 'Arco-Page.pdf', filters: [{ name: 'PDF', extensions: ['pdf'] }] }); if (result.filePath) fs.writeFileSync(result.filePath, await commandTarget(win).wc.printToPDF({ printBackground: true })); break; }
       case 'devtools': commandTarget(win).wc.openDevTools({ mode: 'detach' }); break;
@@ -1176,6 +1177,32 @@ function showItemMenu(win, value) {
   }
   if(template.length)Menu.buildFromTemplate(template).popup({window:win});
 }
+// Only managed, visible page contents can navigate; the shell and background tabs cannot.
+ipcMain.on('arco:gesture-navigate', (event, direction) => {
+  const wc = event.sender;
+  if (!['back', 'forward'].includes(direction) || wc.isDestroyed() || event.senderFrame !== wc.mainFrame) return;
+  let owner = null, tab = null;
+  for (const win of windows) {
+    if (win.isDestroyed() || (win.overlay && win.overlay !== 'find')) continue;
+    if (win.peek) { if (win.peek.webContents === wc && win.peek.getVisible()) owner = win; }
+    else if (win.readerView) {
+      if (win.readerView.webContents === wc && win.readerView.getVisible()) { if (direction === 'back') closeReader(win); return; }
+    } else {
+      tab = [...win.tabs.values()].find(item => item.view?.webContents === wc && item.view.getVisible() && (item.id === win.activeID || item.id === win.splitID));
+      if (tab) owner = win;
+    }
+    if (owner) break;
+  }
+  const popup = popupOwners.get(wc.id);
+  if (!owner && popup && !popup.popup.isDestroyed() && popup.popup.isVisible()) owner = popup.window;
+  if (!owner || owner.isDestroyed()) return;
+  const history = wc.navigationHistory;
+  if (direction === 'back' ? !history.canGoBack() : !history.canGoForward()) return;
+  if (tab) { owner.focusedPaneID = tab.id; owner.peekFocused = false; }
+  wc.focus();
+  if (direction === 'back') history.goBack(); else history.goForward();
+  sendState(owner);
+});
 // 页面只上报操作状态与 requestID；主进程核实消息所属的页面，通知本身不作为认证成功的证据。
 ipcMain.on('arco:passkey-pending', (event, payload) => {
   const wc = event.sender, win = ownerForWebContents(wc), id = payload?.id;
