@@ -484,7 +484,7 @@ document.addEventListener('submit', async event => {
   if (formID === 'favorite-form') { if(await call('add-favorite',data)!==null){closeModal();toast('常驻网站已保存');} }
   if (formID === 'bookmark-form') { if (await call('add-bookmark', data) !== null) { closeModal(); toast('书签已保存到当前空间'); } }
   if (formID === 'folder-form') { if (await call(data.id ? 'update-folder' : 'add-folder', data) !== null) closeModal(); }
-  if (formID === 'space-form') { if (!data.useCustom) data.customColor = ''; else data.customColor = data.customColor || '#d9e6f7'; if (data.id) { if (await call('update-space', data) !== null) closeModal(); } else { if (await call('add-space', data) !== null) closeModal(); } }
+  if (formID === 'space-form') { if (!data.useCustom) data.customColor = ''; else data.customColor = data.customColor || '#d9e6f7'; if (data.id) { if (await call('update-space', data) !== null) closeModal(); } else { if (await call('add-space', data) !== null) { closeModal(); toast(`已创建空间“${data.name.trim()}”`); } } }
   if (formID === 'edit-bookmark-form') { if (await call('update-bookmark', data) !== null) closeModal(); }
   if (formID === 'peek-form') { closeModal(); await call('peek', { url: data.url }); }
   if (formID === 'password-sync-form') { const input=form.elements.passphrase; const passphrase=input.value; input.value=''; if(await call('password-sync-unlock',{passphrase}) && await call('password-sync-now')) {showModal('settings',{section:'sync'});toast('加密密码同步完成');} }
@@ -547,6 +547,25 @@ document.addEventListener('drop',async event=>{
     await call('move-bookmark',{id:move.id,spaceID:targetSpace||state.activeSpaceID,parentID,beforeID:targetBookmark});
   } else if(move.kind==='folder'&&targetFolder!==move.id)await call('update-folder',{id:move.id,parentID:targetFolder||null});
 });
+// 侧栏双指横向滑动切换相邻空间；网页保持原来的前进/后退手势。
+let spaceGesture = null, spaceGestureTimer;
+const resetSpaceGesture = () => { clearTimeout(spaceGestureTimer); spaceGesture = null; };
+$('#sidebar-scroll').addEventListener('wheel', event => {
+  if (!event.isTrusted) return;
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || event.deltaMode !== 0 || modal || !state || state.private || state.little) { resetSpaceGesture(); return; }
+  spaceGesture ||= { x: 0, y: 0, axis: '' };
+  spaceGesture.x += event.deltaX; spaceGesture.y += event.deltaY;
+  if (!spaceGesture.axis && Math.max(Math.abs(spaceGesture.x), Math.abs(spaceGesture.y)) >= 12) spaceGesture.axis = Math.abs(spaceGesture.x) > Math.abs(spaceGesture.y) * 2 ? 'x' : 'y';
+  clearTimeout(spaceGestureTimer);
+  spaceGestureTimer = setTimeout(() => {
+    const finished = spaceGesture; spaceGesture = null;
+    if (!finished || finished.axis !== 'x' || Math.abs(finished.x) < 120) return;
+    const index = state.spaces.findIndex(space => space.id === state.activeSpaceID);
+    const next = state.spaces[index + (finished.x < 0 ? 1 : -1)];
+    if (next) call('switch-space', { id: next.id });
+  }, 180);
+}, { passive: true });
+window.addEventListener('blur', resetSpaceGesture);
 api.onState(value => { state = value; render(); });
 api.onCommand(command => { if (command === 'auth-submitted') { if (!state.httpAuth) closeModal(false); } else if (actions[command]) actions[command](); });
 api.onEditBookmark(item => showModal('edit-bookmark', item));

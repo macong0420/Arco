@@ -49,6 +49,32 @@ test('gestures in real Chromium views', { timeout: 60000 }, async t => {
     finally { await cdp.detach(); }
     assert(await target.evaluate(() => visualViewport.scale > 1.1));
   };
+  await t.test('new spaces work through the real form and persist', async () => {
+    for (const name of ['工作', '学习']) {
+      await shell.locator('[data-action="add-space"]').click();
+      await shell.locator('#space-form [name="name"]').fill(name);
+      await shell.locator('[data-action="submit-space"]').click();
+      await shell.waitForFunction(name => document.querySelector('#space-name')?.textContent === name && !document.querySelector('#space-form'), name);
+    }
+    const saved = JSON.parse(fs.readFileSync(path.join(profile, 'Library.json'), 'utf8'));
+    assert.deepEqual(saved.spaces.map(space => space.name), ['个人', '工作', '学习']);
+    const first = saved.spaces[0];
+    await invoke('switch-space', { id: first.id });
+  });
+  await t.test('sidebar horizontal swipes switch adjacent spaces without wrapping', async () => {
+    const activeName = async () => { const current = await state(); return current.spaces.find(space => space.id === current.activeSpaceID)?.name; };
+    await wheel(shell, 150, 0, 100, 400);
+    assert.equal(await activeName(), '个人');
+    await wheel(shell, -150, 0, 100, 400);
+    assert.equal(await activeName(), '工作');
+    await wheel(shell, 150, 0, 100, 400);
+    assert.equal(await activeName(), '个人');
+    await wheel(shell, -150, 100, 100, 400);
+    assert.equal(await activeName(), '个人');
+    await shell.locator('#sidebar-scroll').evaluate(node => node.dispatchEvent(new WheelEvent('wheel', { deltaX: -150, bubbles: true, cancelable: true })));
+    await new Promise(resolve => setTimeout(resolve, 250));
+    assert.equal(await activeName(), '个人');
+  });
   const page = await open('/a');
   await t.test('no history is a harmless no-op', async () => {
     await wheel(page, -150); assert.equal(page.url(), origin + '/a');
