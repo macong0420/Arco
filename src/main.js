@@ -108,6 +108,7 @@ function persistDownloads() {
   catch (cause) { console.error('无法保存下载记录:', cause.message); }
 }
 function sendState(win) { if (!win || win.isDestroyed() || win.shell.webContents.isDestroyed()) return; layout(win); win.shell.webContents.send('arco:state', serialize(win)); }
+function clearCapture(win, capture) { if (capture && win.capture === capture) win.capture = null; }
 function broadcast() { for (const win of windows) sendState(win); }
 function publicTab(tab) { const wc = tab.view?.webContents, live = !!wc && !wc.isDestroyed(); return { id: tab.id, webContentsID: live ? wc.id : -1, spaceID: tab.spaceID, url: tab.url, title: tab.title, favicon: tab.favicon, loading: live && wc.isLoading(), canBack: live && wc.navigationHistory.canGoBack(), canForward: live && wc.navigationHistory.canGoForward(), muted: live && wc.isAudioMuted(), playing: live && wc.isCurrentlyAudible(), pinned: tab.pinned, store: tab.loadFailed ? '' : storeID(live ? wc.getURL() : tab.url), zoom: live ? wc.getZoomFactor() : 1, asleep: !tab.view }; }
 function serialize(win) {
@@ -116,8 +117,8 @@ function serialize(win) {
     spaces: library.data.spaces.map(({ id, name, color, customColor }) => ({ id, name, color, customColor })), activeSpaceID: win.spaceID,
     favorites: library.data.favorites, folders: win.private ? [] : library.space(win.spaceID)?.folders || [], bookmarks: win.private ? [] : library.space(win.spaceID)?.bookmarks || [],
     allBookmarks: library.data.spaces.flatMap(s => s.bookmarks.map(b => ({ ...b, spaceID: s.id }))),
-    settings: { ...library.settings, dataDirectory: userData }, history: win.private ? [] : (library.history || []), downloads: [...downloads.values()].filter(d => d.private ? d.windowID === win.id : !win.private).map(({ item, ...record }) => record), warning: library.warning,
-    capture: win.capture ? { origin: win.capture.origin, username: win.capture.username } : null, peek: win.peek ? { url: win.peekURL, title: win.peek.webContents.getTitle(), loading: !win.peek.webContents.isDestroyed() && win.peek.webContents.isLoading() } : null,
+    settings: { ...library.settings, dataDirectory: userData }, downloads: [...downloads.values()].filter(d => d.private ? d.windowID === win.id : !win.private).map(({ item, ...record }) => record), warning: library.warning,
+    capture: win.capture ? { tabID: win.capture.tabID, origin: win.capture.origin, username: win.capture.username } : null, peek: win.peek ? { url: win.peekURL, title: win.peek.webContents.getTitle(), loading: !win.peek.webContents.isDestroyed() && win.peek.webContents.isLoading() } : null,
     snapshots: win.snapshots || [], vault: vault.status(), passwordSyncUnlocked: passwordSync.unlocked, sidebarVisible: win.sidebarVisible, reader: win.reader, syncAvailable: false, testMode,
     passkeys: [...passkeyRequests.values()].filter(request => request.win === win && !request.wc.isDestroyed()).map(({ id, origin }) => ({ id, origin })),
     focusedPaneID: win.focusedPaneID, find: win.find ? { query: win.find.query, targetID: win.find.targetID, targetKind: win.find.targetKind, matches: win.find.matches, active: win.find.active } : null, httpAuth: win.httpAuth ? publicAuth(win.httpAuth) : null,
@@ -151,6 +152,7 @@ function layout(win) {
   const [width, height] = win.getContentSize(), side = win.sidebarVisible ? win.sidebarWidth : 0;
   const inset = library.settings.frameInset ? 8 : 0, gap = 8, y = 40 + inset + (win.overlay === 'find' ? 48 : 0);
   const available = Math.max(0, width - side - inset * 2), first = win.tabs.get(win.activeID), second = win.tabs.get(win.splitID);
+  // 密码保存提示不遮挡登录跳转；网页继续可见、可交互，避免看起来像卡住。
   const hidden = !!win.overlay && win.overlay !== 'find';
   // 阅读视图占用整块页面区域；此时底层网页保持隐藏，命令只作用于文章本身。
   for (const tab of win.tabs.values()) if (tab.view) tab.view.setVisible(!hidden && !win.reader && !!tab.url && (tab.id === win.activeID || tab.id === win.splitID));
@@ -795,7 +797,7 @@ function adoptFavoriteIcon(tab) {
   iconAttempts.add(favorite.id);
   cacheFavoriteIcon({ ...favorite, favicon: tab.favicon }).catch(() => {});
 }
-const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'refresh-favorite-icon', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'migrate-browser-data', 'import-browser', 'chrome-extensions', 'import-chrome-extensions', 'install-extension-store', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-delete', 'history-clear', 'save-page', 'clear-site-data', 'default-browser', 'download-open', 'download-reveal', 'download-cancel', 'download-pause', 'download-resume', 'find', 'find-stop', 'passkey-cancel', 'http-auth-submit', 'http-auth-cancel', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'open-system-passwords', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'extension-list', 'extension-toggle', 'extension-popup', 'copy', 'menu', 'confirm-clear']);
+const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'refresh-favorite-icon', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'migrate-browser-data', 'import-browser', 'chrome-extensions', 'import-chrome-extensions', 'install-extension-store', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-search', 'history-delete', 'history-clear', 'save-page', 'clear-site-data', 'default-browser', 'download-open', 'download-reveal', 'download-cancel', 'download-pause', 'download-resume', 'find', 'find-stop', 'passkey-cancel', 'http-auth-submit', 'http-auth-cancel', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'open-system-passwords', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'extension-list', 'extension-toggle', 'extension-popup', 'copy', 'menu', 'confirm-clear']);
 function trustedWindow(event) {
   const win = [...windows].find(w => w.shell.webContents === event.sender);
   if (!win || event.senderFrame !== win.shell.webContents.mainFrame || event.senderFrame.url !== pathToFileURL(path.join(__dirname, 'shell.html')).href) error('未授权的界面请求');
@@ -817,9 +819,13 @@ ipcMain.handle('arco:invoke', async (event, message) => {
         }
         if (generation !== win.overlayGeneration || win.isDestroyed()) return true;
         win.snapshots = kind ? snapshots.slice() : [];
-        win.overlay = kind; layout(win); if (kind) win.shell.webContents.focus(); break;
+        win.overlay = kind; layout(win); if (kind && kind !== 'capture') win.shell.webContents.focus(); break;
       }
       case 'vault-status': return vault.status();
+      case 'history-search': {
+        if (testMode && a.gate) await new Promise(resolve => { win.historyGate = resolve; });
+        return win.private ? [] : library.history.filter(item => !a.query || `${item.title} ${item.url}`.toLowerCase().includes(bounded(a.query, 500).toLowerCase()));
+      }
       case 'password-sync-unlock': if (win.private) error('无痕窗口不能同步密码'); passwordSync.unlock(core.secret(a.passphrase, 1024)); broadcast(); return true;
       case 'password-sync-lock': passwordSync.lock(); broadcast(); return true;
       case 'password-sync-now': {
@@ -956,7 +962,13 @@ ipcMain.handle('arco:invoke', async (event, message) => {
         const request = win.httpAuthQueue.find(item => item.id === bounded(a.id, 128));
         if (!request) error('登录请求已结束');
         if (typeof a.username !== 'string' || a.username.length > 1024 || typeof a.password !== 'string' || !a.password || a.password.length > 4096) error('登录信息无效');
-        finishAuthRequest(request, a.username, a.password); break;
+        const capture = win.capture;
+        finishAuthRequest(request, a.username, a.password);
+        if (capture?.tabID === request.tabID) clearCapture(win, capture);
+        // 只移除已提交的认证表单；保存密码是独立通知，认证队列的下一项要继续显示。
+        if (!win.httpAuth) { win.overlay = ''; win.snapshots = []; layout(win); }
+        if (!win.shell.webContents.isDestroyed()) win.shell.webContents.send('arco:command', 'auth-submitted');
+        break;
       }
       case 'http-auth-cancel': {
         const request = win.httpAuthQueue.find(item => item.id === bounded(a.id, 128));
@@ -994,8 +1006,8 @@ ipcMain.handle('arco:invoke', async (event, message) => {
         if (!sameTarget) error('标签页已变化，已拒绝填充');
         const count = await tab.view.webContents.executeJavaScript(fillScript(credential.username, credential.password, core.exactOrigin(credential.origin)), true); return { count, username: credential.username };
       }
-      case 'capture-save': { if (!win.capture) error('没有待保存的密码'); const capture = win.capture; await vault.save({ origin: capture.origin, username: capture.username, password: capture.password }); win.capture = null; sendState(win); break; }
-      case 'capture-dismiss': win.capture = null; sendState(win); break;
+      case 'capture-save': { if (!win.capture) error('没有待保存的密码'); const capture = win.capture; await vault.save({ origin: capture.origin, username: capture.username, password: capture.password }); clearCapture(win, capture); sendState(win); break; }
+      case 'capture-dismiss': clearCapture(win, win.capture); sendState(win); break;
       case 'generate-password': return require('node:crypto').randomBytes(24).toString('base64url') + '-A9!';
       case 'import-passwords': {
         if (win.private) error('无痕窗口不能导入密码');
@@ -1374,6 +1386,15 @@ if (testMode) {
     }
     if (action === 'auth-waiting') return !!vault.authWaiting;
     if (action === 'release-auth') { vault.releaseAuth?.(); return true; }
+    if (action === 'arm-save-gate') {
+      let release; const pending = new Promise(resolve => { release = resolve; }); const original = vault.save.bind(vault);
+      vault.saveWaiting = false; vault.releaseSave = release;
+      vault.save = async value => { vault.saveWaiting = true; await pending; vault.save = original; return original(value); };
+      return true;
+    }
+    if (action === 'save-waiting') return !!vault.saveWaiting;
+    if (action === 'release-save') { vault.releaseSave?.(); return true; }
+    if (action === 'release-history') { win.historyGate?.(); return true; }
     if (action === 'popup-owners') return [...popupOwners.entries()].map(([webContentsID, owner]) => ({ webContentsID, windowID: owner.window.id, partition: owner.partition, private: owner.private, closed: owner.popup.isDestroyed() }));
     if (action === 'store-approval') { testStoreApproval = payload?.allow !== false; return true; }
     if (action === 'auth-queue') return win.httpAuthQueue.map(publicAuth);
