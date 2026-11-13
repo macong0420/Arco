@@ -252,9 +252,8 @@ function addPageView(win, tab, selected = false) {
 function removePageView(win, tab) { if (!tab.view) return; win.contentView.removeChildView(tab.view); tab.view.setVisible(false); }
 function littleWindowOptions(owner) {
   const area = screen.getDisplayMatching(owner.getBounds()).workArea;
-  const maxWidth = Math.round(area.width * 0.8), maxHeight = Math.round(area.height * 0.8);
-  let height = maxHeight, width = Math.round(height * 560 / 640);
-  if (width > maxWidth) { width = maxWidth; height = Math.round(width * 640 / 560); }
+  const width = Math.min(1100, Math.round(area.width * 0.85));
+  const height = Math.min(820, Math.round(area.height * 0.85));
   const x = owner.isDestroyed() ? undefined : Math.round(owner.getBounds().x + Math.max(0, (owner.getBounds().width - width) / 2));
   const y = Math.round(area.y + (area.height - height) / 2);
   return { width, height, x, y, minWidth: 360, minHeight: 360, title: 'Arco · 小窗口', titleBarStyle: 'default', backgroundColor: '#dce7f7' };
@@ -280,6 +279,7 @@ function createWindow(isPrivate = false, url = '', { little = false, owner = nul
   win.shell.webContents.once('did-finish-load', () => sendState(win));
   win.shell.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.shell.webContents.on('will-navigate', event => event.preventDefault());
+  win.shell.webContents.on('before-input-event', (event, input) => { if (pageShortcut(win, input)) event.preventDefault(); });
   win.on('resize', () => layout(win)); win.on('closed', () => { closeDockedDevTools(win); cancelAuthForWindow(win); clearPasskeyRequests(null, win); for (const tab of win.tabs.values()) if (tab.view && !tab.view.webContents.isDestroyed()) tab.view.webContents.close(); if (win.readerView && !win.readerView.webContents.isDestroyed()) win.readerView.webContents.close(); win.peek?.webContents.close(); if (!win.shell.webContents.isDestroyed()) win.shell.webContents.close(); for (const [id, owner] of popupOwners) if (owner.window === win) popupOwners.delete(id); for (const [id, d] of downloads) if (d.private && d.windowID === win.id) downloads.delete(id); windows.delete(win); });
   win.on('close', () => { if (!win.private && !win.little) saveSession(); });
   windows.add(win); layout(win);
@@ -1030,9 +1030,11 @@ ipcMain.handle('arco:invoke', async (event, message) => {
           if (['system', 'light', 'dark'].includes(a.theme)) settings.theme = a.theme;
           if (['detach', 'right'].includes(a.devtoolsMode)) settings.devtoolsMode = a.devtoolsMode;
           if (['tab', 'little'].includes(a.linkOpenMode)) settings.linkOpenMode = a.linkOpenMode;
+          if (a.shortcuts !== undefined) settings.shortcuts = core.validateShortcuts(a.shortcuts);
           if (typeof a.frameInset === 'boolean') settings.frameInset = a.frameInset;
         });
         nativeTheme.themeSource = library.settings.theme;
+        if (a.shortcuts !== undefined) installMenu();
         broadcast(); break;
       }
       case 'history-delete': {
@@ -1263,32 +1265,38 @@ function pageMenu(win, wc, params) {
 function closeCurrent(win) { if (win.peek) closePeek(win); else closeTab(win, findTab(win).id); }
 // 页面焦点快捷键和原生菜单共用同一张命令表；accelerator 生成菜单项，key/shift 做精确修饰符匹配。
 const COMMANDS = {
-  newTab: { label: '新建标签页', accelerator: 'CmdOrCtrl+T', run: win => { createTab(win, ''); showPalette(win); } },
-  closeTab: { label: '关闭标签页', accelerator: 'CmdOrCtrl+W', run: win => closeCurrent(win) },
-  reopenTab: { label: '恢复关闭的标签页', accelerator: 'Shift+CmdOrCtrl+T', run: win => reopenTab(win) },
-  palette: { label: '地址与搜索', accelerator: 'CmdOrCtrl+L', run: win => showPalette(win) },
-  find: { label: '页内查找', accelerator: 'CmdOrCtrl+F', run: win => win.shell.webContents.send('arco:command', 'find') },
-  findNext: { label: '查找下一个', accelerator: 'CmdOrCtrl+G', run: win => findAgain(win, true) },
-  findPrevious: { label: '查找上一个', accelerator: 'Shift+CmdOrCtrl+G', run: win => findAgain(win, false) },
-  print: { label: '打印', accelerator: 'CmdOrCtrl+P', run: win => commandTarget(win).wc.print({}) }
+  newTab: { label: '新建标签页', run: win => { createTab(win, ''); showPalette(win); } },
+  closeTab: { label: '关闭标签页', run: win => closeCurrent(win) },
+  reopenTab: { label: '恢复关闭的标签页', run: win => reopenTab(win) },
+  palette: { label: '地址与搜索', run: win => showPalette(win) },
+  find: { label: '页内查找', run: win => win.shell.webContents.send('arco:command', 'find') },
+  findNext: { label: '查找下一个', run: win => findAgain(win, true) },
+  findPrevious: { label: '查找上一个', run: win => findAgain(win, false) },
+  print: { label: '打印', run: win => commandTarget(win).wc.print({}) },
+  privateWindow: { label: '新建无痕窗口', run: win => createWindow(true) },
+  closeWindow: { label: '关闭窗口', run: win => win.close() },
+  reload: { label: '重新加载', run: win => commandTarget(win).wc.reload() },
+  overview: { label: '全部标签页', run: win => win.shell.webContents.send('arco:command', 'overview') },
+  history: { label: '浏览历史', run: win => win.shell.webContents.send('arco:command', 'history') },
+  settings: { label: '设置', run: win => win.shell.webContents.send('arco:command', 'settings') },
+  sidebar: { label: '隐藏或显示侧栏', run: win => { win.sidebarVisible = !win.sidebarVisible; layout(win); sendState(win); } },
+  devtools: { label: '开发者工具', run: win => toggleDevTools(win) }
 };
-function acceleratorSpec(accelerator) {
-  const parts = accelerator.split('+'), key = parts.pop().toLowerCase();
-  return { key, shift: parts.includes('Shift'), meta: parts.includes('CmdOrCtrl') };
-}
+const shortcutKey = key => ({ ' ': 'space', esc: 'escape', return: 'enter', arrowup: 'up', arrowdown: 'down', arrowleft: 'left', arrowright: 'right', pageup: 'pageup', pagedown: 'pagedown' }[key.toLowerCase()] || key.toLowerCase());
 function pageShortcut(win, input) {
-  if (input.type !== 'keyDown' || !input.meta || input.control || input.alt) return false;
-  const key = input.key.toLowerCase();
-  for (const command of Object.values(COMMANDS)) {
-    const spec = acceleratorSpec(command.accelerator);
-    // 精确匹配：Shift+Cmd+W 不关闭标签页，Cmd+Shift+T 才恢复标签页。
-    if (spec.meta && spec.key === key && spec.shift === !!input.shift) { command.run(win); return true; }
+  if (input.type !== 'keyDown' || !input.key) return false;
+  const key = shortcutKey(/^(?:Key[A-Z]|Digit[0-9])$/.test(input.code) ? input.code.slice(-1) : input.key);
+  if (!key) return false;
+  for (const [name, command] of Object.entries(COMMANDS)) {
+    const parts = (library.settings.shortcuts[name] || core.DEFAULT_SHORTCUTS[name]).split('+'), expected = parts.pop().toLowerCase();
+    // 精确匹配修饰键，避免 Shift+Cmd+W 误关标签页。
+    if (expected === key && parts.includes('Shift') === !!input.shift && parts.some(part => /^(?:CmdOrCtrl|Cmd|Command|CommandOrControl|Meta|Super)$/i.test(part)) === !!input.meta && parts.some(part => /^(?:Ctrl|Control)$/i.test(part)) === !!input.control && parts.some(part => /^(?:Alt|Option)$/i.test(part)) === !!input.alt) { command.run(win); return true; }
   }
   return false;
 }
 function commandItem(win, name) {
   const command = COMMANDS[name];
-  return { label: command.label, accelerator: command.accelerator, click: () => command.run(win) };
+  return { label: command.label, click: () => command.run(win) };
 }
 function showAppMenu(win) {
   const active = win.tabs.get(win.activeID), store = win.private ? '' : storeID(active?.url);
@@ -1302,8 +1310,7 @@ function showAppMenu(win) {
     ...library.data.spaces.slice(0, 9).map((space, i) => ({ label: `切换到${space.name}`, accelerator: `CmdOrCtrl+${i + 1}`, enabled: !win.private, click: () => switchSpace(win, space.id) })),
     { label: '下一个标签页', accelerator: 'Ctrl+Tab', click: () => { const tabs = [...win.tabs.values()].filter(t => t.spaceID === win.spaceID); const i = tabs.findIndex(t => t.id === win.activeID); if (tabs.length) selectTab(win, tabs[(i + 1) % tabs.length].id); } },
     { type: 'separator' },
-    { label: '无痕窗口', accelerator: 'Shift+CmdOrCtrl+N', click: () => createWindow(true) },
-    { label: '开发者工具', accelerator: 'Alt+CmdOrCtrl+I', click: () => findTab(win).view.webContents.openDevTools({ mode: 'detach' }) }
+    commandItem(win, 'privateWindow'), commandItem(win, 'devtools')
   ]).popup();
 }
 function reconcileSpaces() {
@@ -1323,15 +1330,16 @@ function installMenu() {
   const focused = () => { const win = BaseWindow.getFocusedWindow(); return windows.has(win) ? win : [...windows].find(w => !w.private) || [...windows][0]; };
   const send = command => { const win = focused(); if (win) win.shell.webContents.send('arco:command', command); };
   const run = action => () => { const win = focused(); if (win) action(win); };
-  const command = name => ({ label: COMMANDS[name].label, accelerator: COMMANDS[name].accelerator, click: run(COMMANDS[name].run) });
+  // 菜单不注册 accelerator：统一的 before-input-event 负责网页与壳层焦点，避免双重触发。
+  const command = name => ({ label: COMMANDS[name].label, click: run(COMMANDS[name].run) });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: 'appMenu' },
     { label:'文件', submenu:[
       command('newTab'),
-      {label:'新建无痕窗口',accelerator:'CmdOrCtrl+Shift+N',click:() => createWindow(true)},
+      command('privateWindow'),
       command('closeTab'),
       command('reopenTab'),
-      {label:'关闭窗口',accelerator:'CmdOrCtrl+Shift+W',click:run(w => w.close())},
+      command('closeWindow'),
       command('print')
     ]},
     {role:'editMenu'},
@@ -1340,14 +1348,10 @@ function installMenu() {
       command('find'),
       command('findNext'),
       command('findPrevious'),
-      {label:'重新加载',accelerator:'CmdOrCtrl+R',click:run(w => commandTarget(w).wc.reload())},
-      {label:'全部标签页',accelerator:'CmdOrCtrl+Shift+\\',click:() => send('overview')},
-      {label:'浏览历史',accelerator:'CmdOrCtrl+Y',click:() => send('history')},
-      {label:'设置',accelerator:'CmdOrCtrl+,',click:() => send('settings')},
-      {label:'隐藏或显示侧栏',accelerator:'CmdOrCtrl+S',click:run(w => {w.sidebarVisible=!w.sidebarVisible;sendState(w);})},
+      command('reload'), command('overview'), command('history'), command('settings'), command('sidebar'),
       {label:'下一个标签页',accelerator:'Ctrl+Tab',click:run(w => { const tabs=[...w.tabs.values()].filter(t=>t.spaceID===w.spaceID);const i=tabs.findIndex(t=>t.id===w.activeID);if(tabs.length)selectTab(w,tabs[(i+1)%tabs.length].id); })},
       ...Array.from({length:9},(_,i)=>({label:'切换空间 '+(i+1),accelerator:'CmdOrCtrl+'+(i+1),click:run(w=>{const space=library.data.spaces[i];if(space&&!w.private)switchSpace(w,space.id);})})),
-      {role:'togglefullscreen'}, {role:'toggleDevTools'}
+      {role:'togglefullscreen'}, command('devtools')
     ]}, {role:'windowMenu'}
   ]));
 }

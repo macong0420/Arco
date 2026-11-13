@@ -49,9 +49,25 @@ function secret(value, max = 4096) {
   return value;
 }
 function stamp(value) { return { ...value, updatedAt: value.updatedAt || now() }; }
+const DEFAULT_SHORTCUTS = Object.freeze({ newTab: 'CmdOrCtrl+T', closeTab: 'CmdOrCtrl+W', reopenTab: 'CmdOrCtrl+Shift+T', palette: 'CmdOrCtrl+L', find: 'CmdOrCtrl+F', findNext: 'CmdOrCtrl+G', findPrevious: 'CmdOrCtrl+Shift+G', print: 'CmdOrCtrl+P', privateWindow: 'CmdOrCtrl+Shift+N', closeWindow: 'CmdOrCtrl+Shift+W', reload: 'CmdOrCtrl+R', overview: 'CmdOrCtrl+Shift+\\', history: 'CmdOrCtrl+Y', settings: 'CmdOrCtrl+,', sidebar: 'CmdOrCtrl+S', devtools: 'CmdOrCtrl+Alt+I' });
+const SHORTCUT_MODIFIERS = new Set(['cmdorctrl', 'commandorcontrol', 'cmd', 'command', 'ctrl', 'control', 'alt', 'option', 'shift', 'super', 'meta']);
+const SHORTCUT_KEYS = /^(?:[a-z0-9]|f(?:[1-9]|1[0-9]|2[0-4])|tab|space|enter|return|esc|escape|backspace|delete|up|down|left|right|home|end|pageup|pagedown)$/i;
+function validateShortcuts(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== Object.keys(DEFAULT_SHORTCUTS).length) throw new Error('快捷键格式不正确');
+  const used = new Set();
+  for (const action of Object.keys(DEFAULT_SHORTCUTS)) {
+    const accelerator = value[action];
+    if (typeof accelerator !== 'string' || accelerator !== accelerator.trim()) throw new Error('快捷键格式不正确');
+    const parts = accelerator.split('+'), key = parts.pop();
+    if (!parts.length || parts.some(part => !SHORTCUT_MODIFIERS.has(part.toLowerCase())) || new Set(parts.map(part => part.toLowerCase())).size !== parts.length || (!SHORTCUT_KEYS.test(key) && !/^[-=[\];',./`\\]$/.test(key)) || !parts.some(part => !['shift'].includes(part.toLowerCase()))) throw new Error('快捷键格式不正确');
+    if (used.has(accelerator.toLowerCase())) throw new Error('快捷键不能重复');
+    used.add(accelerator.toLowerCase());
+  }
+  return { ...value };
+}
 function initialLibrary() {
   const space = stamp({ id: 'personal', name: '个人', color: 'sky', customColor: '', bookmarks: [], folders: [] });
-  return { version: 1, spaces: [space], favorites: [], tombstones: {}, settings: { engine: 'google', sidebarWidth: 240, frameInset: true, trackerBlocking: true, theme: 'system', devtoolsMode: 'detach', linkOpenMode: 'tab', onboarded: false, syncFolder: '', syncStatus: '', extensions: [] }, updatedAt: now() };
+  return { version: 1, spaces: [space], favorites: [], tombstones: {}, settings: { shortcuts: { ...DEFAULT_SHORTCUTS }, engine: 'google', sidebarWidth: 240, frameInset: true, trackerBlocking: true, theme: 'system', devtoolsMode: 'detach', linkOpenMode: 'tab', onboarded: false, syncFolder: '', syncStatus: '', extensions: [] }, updatedAt: now() };
 }
 function validRecord(record) {
   return record && typeof record.id === 'string' && !['__proto__','constructor','prototype'].includes(record.id) && /^[\w-]{1,128}$/.test(record.id) && typeof record.updatedAt === 'string' && Number.isFinite(Date.parse(record.updatedAt));
@@ -60,6 +76,7 @@ const PASTEL = ['sky', 'lavender', 'rose', 'peach', 'sand', 'sage', 'mint', 'whi
 // 远端是共享文件夹里的不可信数据：逐字段白名单校验，拒绝任何协议/循环/越界输入，防脏数据进渲染层。
 function validateLibrary(data) {
   if (!data || data.version !== 1 || !Array.isArray(data.spaces) || !data.spaces.length || !Array.isArray(data.favorites) || !data.settings || typeof data.settings !== 'object' || !data.tombstones || typeof data.tombstones !== 'object') throw new Error('书库格式不正确');
+  data.settings.shortcuts = validateShortcuts({ ...DEFAULT_SHORTCUTS, ...data.settings.shortcuts });
   if (data.spaces.length > 200 || data.favorites.length > 20000 || Object.keys(data.tombstones).length > 100000) throw new Error('书库记录数量超出限制');
   for (const space of data.spaces) {
     if (!validRecord(space) || typeof space.name !== 'string' || !space.name.length || space.name.length > 100 || !Array.isArray(space.bookmarks) || !Array.isArray(space.folders)) throw new Error('空间格式不正确');
@@ -375,4 +392,4 @@ function parseFirefoxTree(rows) {
   }
   return result;
 }
-module.exports = { ENGINES, webURL, navigate, exactOrigin, originAllowed, id, now, text, secret, stamp, initialLibrary, validateLibrary, mergeLibraries, atomicWrite, loadJSON, reorder, deleteRecords, parseChromiumBookmarks, parseNetscape, netscape, parseCSV, parseArcSidebar, parsePlistXML, parseSafariBookmarks, parseFirefoxTree };
+module.exports = { DEFAULT_SHORTCUTS, validateShortcuts, ENGINES, webURL, navigate, exactOrigin, originAllowed, id, now, text, secret, stamp, initialLibrary, validateLibrary, mergeLibraries, atomicWrite, loadJSON, reorder, deleteRecords, parseChromiumBookmarks, parseNetscape, netscape, parseCSV, parseArcSidebar, parsePlistXML, parseSafariBookmarks, parseFirefoxTree };

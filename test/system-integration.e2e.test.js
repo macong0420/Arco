@@ -73,9 +73,10 @@ test('toolbar system integration: translate, Little Arc and developer tools', { 
         const win = BaseWindow.getAllWindows().find(item => item.id === id);
         return win ? { size: win.getSize(), area: screen.getDisplayMatching(win.getBounds()).workArea } : {};
       }, little.id);
-      assert(size && Math.abs(size[0] / size[1] - 560 / 640) < .02, 'Little Arc must preserve its aspect ratio');
-      assert(size[0] <= area.width * .8 + 2 && size[1] <= area.height * .8 + 2, 'Little Arc must fit the work area');
-      assert(size[1] > 640, 'Little Arc must use the available work area instead of the old fixed size');
+      assert.equal(size[0], Math.min(1100, Math.round(area.width * .85)), 'Little Arc defaults to a useful landscape width');
+      assert.equal(size[1], Math.min(820, Math.round(area.height * .85)), 'Little Arc defaults to a useful landscape height');
+      assert(size[0] <= area.width && size[1] <= area.height, 'Little Arc must fit the work area');
+      assert(size[0] >= 800 && size[1] >= 700, 'Little Arc must not collapse into a narrow portrait window');
       await child.evaluate(url => window.arco.invoke('arco:invoke', { channel: 'navigate', payload: { input: url } }), origin + '/link');
       let childPage = null;
       await eventually(async () => { childPage = (await app.windows()).find(candidate => candidate.url() === origin + '/link'); return !!childPage; }, 'Little Arc link page');

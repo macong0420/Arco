@@ -26,7 +26,7 @@ class Library {
     const fresh = !fs.existsSync(this.file);
     const loaded = core.loadJSON(this.file, core.initialLibrary(), core.validateLibrary);
     this.data = loaded.data; this.warning = loaded.warning;
-    this.settings = { ...core.initialLibrary().settings, ...this.data.settings };
+    this.settings = { ...core.initialLibrary().settings, ...this.data.settings, shortcuts: core.validateShortcuts({ ...core.DEFAULT_SHORTCUTS, ...this.data.settings.shortcuts }) };
     // 只有全新安装才弹首次引导；已有数据的升级用户已经用过了，不再打扰。
     if (typeof this.settings.onboarded !== 'boolean') this.settings.onboarded = fresh;
     if (!/^[\w-]{1,128}$/.test(this.settings.deviceID || '')) this.settings.deviceID = core.id();

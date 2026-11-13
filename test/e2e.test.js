@@ -364,6 +364,52 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     await page.click('#peek-link',{button:'middle'});
     await waitState(s=>s.tabs.length===tabCount+1&&!s.peek);
   });
+  await t.test('shortcut settings record, persist and work from page and shell focus',async()=>{
+    if(await shell.locator('#overlay-root').isVisible())await shell.keyboard.press('Escape');
+    const page=await remote(origin+'/shortcut');
+    await shell.locator('[data-action="settings"]').first().click(); await shell.locator('[data-settings-section="shortcuts"]').click();
+    await shell.locator('[data-record-shortcut="sidebar"]').click();
+    await shell.keyboard.press('Control+Alt+B');
+    assert.equal(await shell.locator('[data-record-shortcut="sidebar"]').textContent(),'⌃ ⌥ B');
+    await shell.locator('[data-record-shortcut="devtools"]').click(); await shell.keyboard.press('Control+Alt+U');
+    await shell.locator('[data-record-shortcut="closeTab"]').click(); await shell.keyboard.press('Meta+w');
+    assert.equal((await inspect('state')).tabs.some(tab=>tab.url===page.url()),true,'recording Cmd+W must not close a page');
+    await shell.locator('[data-action="save-shortcuts"]').click();
+    await eventuallySettings('sidebar');
+    async function eventuallySettings(action) { for(let i=0;i<100;i++){const current=await inspect('state');if(current.settings.shortcuts[action]===({sidebar:'Ctrl+Alt+B',devtools:'Ctrl+Alt+U'}[action]))return;await new Promise(resolve=>setTimeout(resolve,50));}throw new Error('Shortcut was not saved'); }
+    const saved=JSON.parse(fs.readFileSync(path.join(profile,'Library.json'),'utf8'));
+    assert.equal(saved.settings.shortcuts.sidebar,'Ctrl+Alt+B'); assert.equal(saved.settings.shortcuts.devtools,'Ctrl+Alt+U');
+    await shell.locator('#overlay-root [data-close-modal]').click();
+    const before=await inspect('state');
+    await press(page,'B',['control','alt']); await waitState(s=>s.sidebarVisible!==before.sidebarVisible);
+    await shell.getByRole('button',{name:'显示侧栏',exact:true}).click();
+    const sidebarBeforeOld=await inspect('state');
+    await press(page,'S',['meta']); await waitState(s=>s.sidebarVisible===sidebarBeforeOld.sidebarVisible,'old sidebar shortcut must be replaced');
+    if(sidebarBeforeOld.sidebarVisible===false)await shell.getByRole('button',{name:'显示侧栏',exact:true}).click();
+    await press(page,'U',['control','alt']); await waitState(s=>!!s&&!!s.tabs);
+    for(let i=0;i<100;i++){if(await inspect('devtools-open'))break;await new Promise(resolve=>setTimeout(resolve,50));}
+    assert.equal(await inspect('devtools-open'),true);
+    await invoke('devtools');
+    await shell.locator('[data-action="settings"]').first().click({force:true}); await shell.locator('[data-settings-section="shortcuts"]').click();
+    await shell.locator('[data-action="reset-shortcuts"]').click(); await shell.locator('[data-action="save-shortcuts"]').click();
+    for(let i=0;i<100;i++){if((await inspect('state')).settings.shortcuts.sidebar==='CmdOrCtrl+S')break;await new Promise(resolve=>setTimeout(resolve,50));}
+    await shell.locator('#overlay-root [data-close-modal]').click();
+    await press(page,'S',['meta']); await waitState(s=>s.sidebarVisible===false);
+    await shell.getByRole('button',{name:'显示侧栏',exact:true}).click();
+    await shell.locator('[data-action="settings"]').first().click(); await shell.locator('[data-settings-section="shortcuts"]').click();
+    await shell.locator('[data-record-shortcut="sidebar"]').click(); await shell.keyboard.press('Control+Alt+B');
+    await shell.locator('[data-action="save-shortcuts"]').click();
+    await assertEventually(async()=>(await inspect('state')).settings.shortcuts.sidebar==='Ctrl+Alt+B');
+    await shell.locator('#overlay-root [data-close-modal]').click();
+    await close(); await launch();
+    assert.equal((await inspect('state')).settings.shortcuts.sidebar,'Ctrl+Alt+B','custom shortcuts must survive restart');
+    const restartSidebar=(await inspect('state')).sidebarVisible;
+    await app.evaluate(({BaseWindow})=>BaseWindow.getAllWindows()[0].contentView.children[0].webContents.sendInputEvent({type:'keyDown',keyCode:'b',modifiers:['control','alt']}));
+    await waitState(s=>s.sidebarVisible!==restartSidebar);
+    if((await inspect('state')).sidebarVisible===false)await shell.getByRole('button',{name:'显示侧栏',exact:true}).click();
+    await invoke('update-settings',{shortcuts:Object.fromEntries(Object.entries((await inspect('state')).settings.shortcuts).map(([key,value])=>[key,({sidebar:'CmdOrCtrl+S',devtools:'CmdOrCtrl+Alt+I'}[key]||value)]))});
+    await assertEventually(async()=>(await inspect('state')).settings.shortcuts.sidebar==='CmdOrCtrl+S');
+  });
   await t.test('a native passkey request stays pending and is cancellable from the shell',async()=>{
     const url=origin.replace('127.0.0.1','localhost')+'/second';
     await invoke('new-tab',{url}); const page=await remote(url), pageOrigin=new URL(url).origin;
