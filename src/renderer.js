@@ -550,20 +550,23 @@ document.addEventListener('drop',async event=>{
 // 侧栏双指横向滑动切换相邻空间；网页保持原来的前进/后退手势。
 let spaceGesture = null, spaceGestureTimer;
 const resetSpaceGesture = () => { clearTimeout(spaceGestureTimer); spaceGesture = null; };
-$('#sidebar-scroll').addEventListener('wheel', event => {
+$('#sidebar').addEventListener('wheel', event => {
   if (!event.isTrusted) return;
-  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || event.deltaMode !== 0 || modal || !state || state.private || state.little) { resetSpaceGesture(); return; }
-  spaceGesture ||= { x: 0, y: 0, axis: '' };
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || event.deltaMode !== 0 || event.defaultPrevented || modal || !state || state.private || state.little) { resetSpaceGesture(); return; }
+  // 空间按钮过多时，底部横向滚动仍由按钮列表自己处理。
+  const switcher = event.target.closest('#space-switcher');
+  if (switcher && switcher.scrollWidth > switcher.clientWidth) { resetSpaceGesture(); return; }
+  spaceGesture ||= { x: 0, y: 0, axis: '', triggered: false };
   spaceGesture.x += event.deltaX; spaceGesture.y += event.deltaY;
-  if (!spaceGesture.axis && Math.max(Math.abs(spaceGesture.x), Math.abs(spaceGesture.y)) >= 12) spaceGesture.axis = Math.abs(spaceGesture.x) > Math.abs(spaceGesture.y) * 2 ? 'x' : 'y';
+  if (!spaceGesture.axis && Math.max(Math.abs(spaceGesture.x), Math.abs(spaceGesture.y)) >= 8) spaceGesture.axis = Math.abs(spaceGesture.x) > Math.abs(spaceGesture.y) ? 'x' : 'y';
   clearTimeout(spaceGestureTimer);
-  spaceGestureTimer = setTimeout(() => {
-    const finished = spaceGesture; spaceGesture = null;
-    if (!finished || finished.axis !== 'x' || Math.abs(finished.x) < 120) return;
-    const index = state.spaces.findIndex(space => space.id === state.activeSpaceID);
-    const next = state.spaces[index + (finished.x < 0 ? 1 : -1)];
-    if (next) call('switch-space', { id: next.id });
-  }, 180);
+  spaceGestureTimer = setTimeout(resetSpaceGesture, 180);
+  if (spaceGesture.triggered || spaceGesture.axis !== 'x' || Math.abs(spaceGesture.x) < 60) return;
+  const index = state.spaces.findIndex(space => space.id === state.activeSpaceID);
+  const next = state.spaces[index + (spaceGesture.x < 0 ? 1 : -1)];
+  if (!next) return;
+  spaceGesture.triggered = true;
+  call('switch-space', { id: next.id });
 }, { passive: true });
 window.addEventListener('blur', resetSpaceGesture);
 api.onState(value => { state = value; render(); });
