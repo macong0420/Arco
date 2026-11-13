@@ -39,6 +39,10 @@
     <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1 6.2-5.5-3-5.5 3 1-6.2L3 9.6l6.2-.9L12 3Z"/></symbol>
     <symbol id="i-private" viewBox="0 0 24 24"><path d="M3 11c5-5 13-5 18 0-5 6-13 6-18 0Zm8-7h2m-4 2h6M9 15l6-6"/></symbol>
     <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 7h4l2-3h4l2 3h4v13H4V7Z"/><circle cx="12" cy="13" r="4"/></symbol>
+    <symbol id="i-translate" viewBox="0 0 24 24"><path d="M4 5h10M9 3v2m-4 4c2.5 2.5 5.5 4 9 4M5 15c2.2-2.4 3.6-5.4 4.2-8.5M13 20l4-10 4 10m-6.8-3h5.6"/></symbol>
+    <symbol id="i-little" viewBox="0 0 24 24"><rect x="3.5" y="6" width="13" height="12" rx="2"/><path d="M10 3.5h8.5A2.5 2.5 0 0 1 21 6v9"/></symbol>
+    <symbol id="i-devtools" viewBox="0 0 24 24"><path d="m8 8-4 4 4 4m8-8 4 4-4 4M13.5 5l-3 14"/></symbol>
+    <symbol id="i-promote" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M3.5 9h17M12 17v-6m-3 3 3-3 3 3"/></symbol>
     <symbol id="i-print" viewBox="0 0 24 24"><path d="M7 9V3h10v6M7 17H4V9h16v8h-3M7 14h10v7H7v-7Z"/></symbol>
   </defs></svg>
   <aside id="sidebar" aria-label="浏览器侧栏">
@@ -66,6 +70,7 @@
       <div class="shortcut-row"><button data-action="overview"><svg><use href="#i-tabs"/></svg>查看全部标签页</button><button data-action="history"><svg><use href="#i-history"/></svg>浏览历史</button><button data-action="passwords"><svg><use href="#i-key"/></svg>密码</button></div>
       <p class="new-tab-note">你的书签、空间与密码，留在你手中。</p>
     </div>
+    <div id="little-toolbar" class="page-toolbar drag-region" role="toolbar" aria-label="小窗口工具栏" hidden><span id="little-domain" class="toolbar-spacer"></span><button class="icon" data-action="little-promote" title="嵌入为新标签页" aria-label="嵌入为新标签页"><svg><use href="#i-promote"/></svg></button><button class="icon" data-action="little-close" title="关闭小窗口" aria-label="关闭小窗口"><svg><use href="#i-close"/></svg></button></div>
     <div id="page-toolbar" class="page-toolbar drag-region" role="toolbar" aria-label="页面工具栏">
       <div class="toolbar-leading">
         <button id="toolbar-sidebar-toggle" class="icon" aria-controls="sidebar" aria-expanded="false" data-action="toggle-sidebar" aria-label="显示侧栏" title="显示侧栏" hidden><svg><use href="#i-sidebar"/></svg></button>
@@ -73,7 +78,7 @@
         <div id="toolbar-utility" class="toolbar-group"><button class="icon" data-action="menu" title="浏览器菜单" aria-label="浏览器菜单"><svg><use href="#i-menu"/></svg></button><button class="icon" data-action="overview" title="全部标签页" aria-label="全部标签页"><svg><use href="#i-tabs"/></svg></button><button class="icon" data-action="toggle-split" title="分屏" aria-label="分屏"><svg><use href="#i-split"/></svg></button></div>
       </div>
       <span class="toolbar-spacer"></span><button id="toolbar-address" class="toolbar-location" data-action="palette" aria-label="编辑当前地址" hidden><span id="toolbar-domain"></span></button><span class="toolbar-spacer"></span>
-      <div class="toolbar-trailing"><button class="icon" data-extensions-entry data-action="extensions" title="扩展" aria-label="扩展" hidden><svg><use href="#i-puzzle"/></svg></button><button id="store-install" class="toolbar-install" data-action="install-store" title="用 Arco 安装此扩展" hidden>安装扩展</button><button class="icon" data-action="add-current-bookmark" title="固定为书签" aria-label="固定为书签"><svg><use href="#i-star"/></svg></button><button class="icon" data-action="reader" title="阅读视图" aria-label="阅读视图"><svg><use href="#i-reader"/></svg></button><button class="icon" data-action="passwords" title="密码" aria-label="密码"><svg><use href="#i-key"/></svg></button><button class="icon" data-action="find" title="页内查找" aria-label="页内查找"><svg><use href="#i-search"/></svg></button><button id="collapsed-menu" class="icon" data-action="menu" title="浏览器菜单" aria-label="浏览器菜单" hidden><svg><use href="#i-menu"/></svg></button></div>
+      <div class="toolbar-trailing"><button class="icon" data-extensions-entry data-action="extensions" title="扩展" aria-label="扩展" hidden><svg><use href="#i-puzzle"/></svg></button><button id="store-install" class="toolbar-install" data-action="install-store" title="用 Arco 安装此扩展" hidden>安装扩展</button><button class="icon" data-action="add-current-bookmark" title="固定为书签" aria-label="固定为书签"><svg><use href="#i-star"/></svg></button><button class="icon" data-action="reader" title="阅读视图" aria-label="阅读视图"><svg><use href="#i-reader"/></svg></button><button class="icon" data-action="passwords" title="密码" aria-label="密码"><svg><use href="#i-key"/></svg></button><button class="icon" data-action="translate" title="翻译此页" aria-label="翻译此页"><svg><use href="#i-translate"/></svg></button><button class="icon" data-action="little-window" title="小窗口打开" aria-label="小窗口打开"><svg><use href="#i-little"/></svg></button><button class="icon" data-action="devtools" title="开发者工具" aria-label="开发者工具"><svg><use href="#i-devtools"/></svg></button><button class="icon" data-action="find" title="页内查找" aria-label="页内查找"><svg><use href="#i-search"/></svg></button><button id="collapsed-menu" class="icon" data-action="menu" title="浏览器菜单" aria-label="浏览器菜单" hidden><svg><use href="#i-menu"/></svg></button></div>
     </div>
     <div id="second-toolbar" class="page-toolbar"><strong id="second-title"></strong><span class="toolbar-spacer"></span><button class="icon" data-action="close-split" title="关闭分屏"><svg><use href="#i-close"/></svg></button></div>
     <div id="split-resizer" role="separator" aria-label="调整分屏大小"></div>

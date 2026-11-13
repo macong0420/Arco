@@ -22,6 +22,10 @@ document.addEventListener('submit', event => { if (event.isTrusted) capture(even
 document.addEventListener('click', event => {
   if (!event.isTrusted) return;
   const link = event.target.closest?.('a[href]');
+  if (link && event.button === 0 && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && !event.defaultPrevented && (!link.target || link.target === '_self') && !link.hasAttribute('download') && /^https?:/.test(link.href)) {
+    const target = new URL(link.href), sameDocument = target.hash && target.origin === location.origin && target.pathname === location.pathname && target.search === location.search;
+    if (!sameDocument) ipcRenderer.send('arco:page-link', { url: target.href });
+  }
   if (event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && link && /^https?:/.test(link.href)) { event.preventDefault(); event.stopImmediatePropagation(); ipcRenderer.send('arco:page-peek', { url: link.href }); return; }
   const button = event.target.closest?.('button[type="submit"],input[type="submit"]');
   if (button) capture(button.form);
@@ -31,6 +35,44 @@ document.addEventListener('drop', event => {
   if (!event.isTrusted) return;
   const id = event.dataTransfer.getData('application/x-arco-tab');
   if (id) { event.preventDefault(); ipcRenderer.send('arco:page-split', { id }); }
+});
+
+// 翻译只处理当前文档可见文字。节点列表和原文留在隔离世界；页面脚本无法读取翻译 IPC。
+const translation = { nodes: [], original: [] };
+const translationText = () => {
+  const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!node.nodeValue?.trim() || !node.parentElement) return NodeFilter.FILTER_REJECT;
+      if (node.parentElement.closest('script,style,noscript,textarea,input,select,option,[contenteditable="true"]')) return NodeFilter.FILTER_REJECT;
+      const box = node.parentElement.getBoundingClientRect(), style = getComputedStyle(node.parentElement);
+      return box.width > 0 && box.height > 0 && style.visibility === 'visible' && Number(style.opacity) > 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    }
+  });
+  const nodes = [], texts = [];
+  for (let node; (node = walker.nextNode());) {
+    const value = node.nodeValue.replace(/\s+/g, ' ').trim();
+    if (value.length > 2000) continue;
+    nodes.push(node); texts.push(value);
+    if (nodes.length >= 500) break;
+  }
+  return { nodes, texts };
+};
+ipcRenderer.on('arco:page-translate', (_event, payload) => {
+  const id = payload?.id;
+  if (typeof id !== 'string' || !id || id.length > 128) return;
+  if (payload.action === 'extract') {
+    translation.nodes = []; translation.original = [];
+    const found = translationText();
+    translation.nodes = found.nodes; translation.original = found.texts;
+    ipcRenderer.send('arco:page-translate-result', { id, texts: found.texts });
+  } else if (payload.action === 'apply' && Array.isArray(payload.texts) && payload.texts.length === translation.nodes.length) {
+    payload.texts.forEach((text, index) => { if (typeof text === 'string' && text.length <= 4000) translation.nodes[index].nodeValue = text; });
+    ipcRenderer.send('arco:page-translate-result', { id, applied: translation.nodes.length });
+  } else if (payload.action === 'restore') {
+    translation.original.forEach((text, index) => { if (translation.nodes[index]?.isConnected) translation.nodes[index].nodeValue = text; });
+    translation.nodes = []; translation.original = [];
+    ipcRenderer.send('arco:page-translate-result', { id, restored: true });
+  } else ipcRenderer.send('arco:page-translate-result', { id, error: '翻译操作无效' });
 });
 
 // 标准 publicKey create/get 仍交给 Chromium 做原生校验和认证器选择：页面世界里只叠加一个可取消的
