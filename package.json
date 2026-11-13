@@ -9,7 +9,7 @@
   "scripts": {
     "start": "npm run build:native && electron .",
     "test": "node --test test/core.test.js test/sync.test.js test/browsers.test.js test/crx.test.js test/migration.test.js test/library-transactions.test.js test/passkeys.test.js test/gestures.test.js",
-    "test:e2e": "npm run build:native && node --test --test-concurrency=1 test/e2e.test.js test/migration.e2e.test.js test/safety.e2e.test.js test/parity.e2e.test.js test/passkeys.e2e.test.js test/gestures.e2e.test.js test/zigzag-parity.e2e.test.js",
+    "test:e2e": "npm run build:native && node --test --test-concurrency=1 test/e2e.test.js test/migration.e2e.test.js test/safety.e2e.test.js test/parity.e2e.test.js test/passkeys.e2e.test.js test/gestures.e2e.test.js test/zigzag-parity.e2e.test.js test/system-integration.e2e.test.js",
     "build:native": "sh scripts/build-native.sh",
     "icon": "swift scripts/make-icon.swift",
     "pack": "npm run build:native && electron-builder --mac dir --arm64 && sh scripts/sign-local.sh",
@@ -26,7 +26,8 @@
     "asar": true,
     "files": ["src/**/*", "resources/**/*", "package.json", "LICENSE", "NOTICE", "README.md"],
     "extraResources": [
-      { "from": "native/ArcoVault", "to": "native/ArcoVault" }
+      { "from": "native/ArcoVault", "to": "native/ArcoVault" },
+      { "from": "native/ArcoTranslate", "to": "native/ArcoTranslate" }
     ],
     "mac": {
       "category": "public.app-category.productivity",

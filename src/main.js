@@ -1,5 +1,5 @@
 'use strict';
-const { app, BaseWindow, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, clipboard, Menu, nativeTheme, nativeImage } = require('electron');
+const { app, BaseWindow, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, clipboard, Menu, nativeTheme, nativeImage, screen } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -11,6 +11,7 @@ let migrationPending = false;
 const { createExtensionHost } = require('./extension-host');
 const { EncryptedVault, MemoryVault } = require('./vault');
 const { PasswordSync, mergeCredentials } = require('./password-sync');
+const { Translator } = require('./translate');
 const { pathToFileURL } = require('node:url');
 
 // 平台通行密钥（Passkeys）需要 Arco 自己的 Apple 浏览器授权、签名/配置文件与钥匙串 entitlement。
@@ -49,7 +50,7 @@ let launched = false;
 function openExternalURL(url) {
   if (!isHTTP(url)) return;
   if (!launched) { pendingURLs.push(url); return; }
-  const win = [...windows].find(w => !w.private && !w.isDestroyed()) || createWindow(false);
+  const win = [...windows].find(w => !w.private && !w.little && !w.isDestroyed()) || [...windows].find(w => !w.private && !w.isDestroyed()) || createWindow(false);
   createTab(win, url, { select: true }); if (win.isMinimized()) win.restore(); win.focus();
 }
 app.on('open-url', (event, url) => { event.preventDefault(); openExternalURL(url); });
@@ -60,7 +61,8 @@ function dockProgress() {
   if (win) win.setProgressBar(!active.length ? -1 : total ? Math.min(1, active.reduce((sum, d) => sum + d.received, 0) / total) : 2);
   app.dock?.setBadge(active.length > 1 ? String(active.length) : '');
 }
-let library, vault, passwordSync, extensionHost;
+let library, vault, passwordSync, extensionHost, translator;
+const translationRequests = new Map();
 const normalSession = 'persist:arco';
 const downloads = new Map();
 const popupOwners = new Map();
@@ -108,6 +110,62 @@ function persistDownloads() {
   catch (cause) { console.error('无法保存下载记录:', cause.message); }
 }
 function sendState(win) { if (!win || win.isDestroyed() || win.shell.webContents.isDestroyed()) return; layout(win); win.shell.webContents.send('arco:state', serialize(win)); }
+function cancelTranslationRequests(wc) {
+  for (const [id, request] of translationRequests) {
+    if (request.wc !== wc) continue;
+    translationRequests.delete(id); clearTimeout(request.timer); request.reject(new Error('页面已变化，翻译已取消'));
+  }
+}
+function pageTranslation(wc, action, texts) {
+  const id = core.id();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { translationRequests.delete(id); reject(new Error('页面没有响应翻译请求')); }, 30000);
+    translationRequests.set(id, { wc, resolve, reject, timer });
+    wc.send('arco:page-translate', { id, action, texts });
+  });
+}
+async function translateTab(win) {
+  const tab = findTab(win);
+  if (!tab.view || tab.view.webContents.isDestroyed() || !isHTTP(tab.url)) error('请先打开一个网页再翻译');
+  const wc = tab.view.webContents, generation = tab.generation || 0;
+  if (tab.translation) {
+    await pageTranslation(wc, 'restore');
+    if (win.tabs.get(tab.id) === tab && (tab.generation || 0) === generation) { tab.translation = null; sendState(win); }
+    return null;
+  }
+  if (tab.translating) error('这个页面正在翻译');
+  tab.translating = true; sendState(win);
+  try {
+    const extracted = await pageTranslation(wc, 'extract');
+    const texts = Array.isArray(extracted.texts) ? extracted.texts : [];
+    if (!texts.length) error('这个页面没有可翻译的可见文字');
+    const joined = texts.join('\n').slice(0, 200000);
+    const detected = await translator.detect(joined);
+    let result;
+    try { result = await translator.translate(bounded(detected.source, 32), texts); }
+    catch (cause) {
+      if (!wc.isDestroyed()) await pageTranslation(wc, 'restore').catch(() => {});
+      throw cause;
+    }
+    if (!Array.isArray(result.texts) || result.texts.length !== texts.length) error('翻译返回的文字数量不匹配');
+    if (win.isDestroyed() || win.tabs.get(tab.id) !== tab || (tab.generation || 0) !== generation || wc.isDestroyed()) error('页面已变化，已取消翻译');
+    await pageTranslation(wc, 'apply', result.texts);
+    tab.translation = { source: detected.source, count: texts.length };
+    return tab.translation;
+  } finally {
+    tab.translating = false;
+    if (!win.isDestroyed()) sendState(win);
+  }
+}
+function openLittleWindow(win, rawURL = '') {
+  const tab = win.tabs.get(win.activeID) || findTab(win);
+  const url = rawURL ? core.webURL(rawURL) : (tab.view && !tab.view.webContents.isDestroyed() ? tab.view.webContents.getURL() : tab.url);
+  if (!isHTTP(url)) error('请先打开一个网页再使用小窗口');
+  const little = createWindow(false, url, { little: true, owner: win });
+  little.littleOwner = win;
+  little.once('ready-to-show', () => { if (!little.isDestroyed()) little.show(); });
+  return { id: little.id };
+}
 function broadcast() { for (const win of windows) sendState(win); }
 function publicTab(tab) { const wc = tab.view?.webContents, live = !!wc && !wc.isDestroyed(); return { id: tab.id, webContentsID: live ? wc.id : -1, spaceID: tab.spaceID, url: tab.url, title: tab.title, favicon: tab.favicon, loading: live && wc.isLoading(), canBack: live && wc.navigationHistory.canGoBack(), canForward: live && wc.navigationHistory.canGoForward(), muted: live && wc.isAudioMuted(), playing: live && wc.isCurrentlyAudible(), pinned: tab.pinned, store: tab.loadFailed ? '' : storeID(live ? wc.getURL() : tab.url), zoom: live ? wc.getZoomFactor() : 1, asleep: !tab.view }; }
 function serialize(win) {
@@ -117,7 +175,7 @@ function serialize(win) {
     favorites: library.data.favorites, folders: win.private ? [] : library.space(win.spaceID)?.folders || [], bookmarks: win.private ? [] : library.space(win.spaceID)?.bookmarks || [],
     allBookmarks: library.data.spaces.flatMap(s => s.bookmarks.map(b => ({ ...b, spaceID: s.id }))),
     settings: { ...library.settings, dataDirectory: userData }, history: win.private ? [] : (library.history || []), downloads: [...downloads.values()].filter(d => d.private ? d.windowID === win.id : !win.private).map(({ item, ...record }) => record), warning: library.warning,
-    capture: win.capture ? { origin: win.capture.origin, username: win.capture.username } : null, peek: win.peek ? { url: win.peekURL, title: win.peek.webContents.getTitle(), loading: !win.peek.webContents.isDestroyed() && win.peek.webContents.isLoading() } : null,
+    capture: win.capture ? { origin: win.capture.origin, username: win.capture.username } : null, little: !!win.little, translation: win.tabs.get(win.activeID)?.translation || null, peek: win.peek ? { url: win.peekURL, title: win.peek.webContents.getTitle(), loading: !win.peek.webContents.isDestroyed() && win.peek.webContents.isLoading() } : null,
     snapshots: win.snapshots || [], vault: vault.status(), passwordSyncUnlocked: passwordSync.unlocked, sidebarVisible: win.sidebarVisible, reader: win.reader, syncAvailable: false, testMode,
     passkeys: [...passkeyRequests.values()].filter(request => request.win === win && !request.wc.isDestroyed()).map(({ id, origin }) => ({ id, origin })),
     focusedPaneID: win.focusedPaneID, find: win.find ? { query: win.find.query, targetID: win.find.targetID, targetKind: win.find.targetKind, matches: win.find.matches, active: win.find.active } : null, httpAuth: win.httpAuth ? publicAuth(win.httpAuth) : null,
@@ -133,24 +191,48 @@ function loadSession() {
 }
 function saveSession() {
   if (!library || !sessionReady) return;
-  const normalWindows = [...windows].filter(w => !w.private && !w.isDestroyed());
+  const normalWindows = [...windows].filter(w => !w.private && !w.little && !w.isDestroyed());
   const normal = normalWindows.find(w => w.isFocused()) || normalWindows[0];
   const tabs = normal ? normalWindows.flatMap(w => [...w.tabs.values()]).filter(t => !t.url || isHTTP(t.url)).map(t => ({ id: t.id, spaceID: t.spaceID, url: t.url, title: t.title, pinned: t.pinned })) : library.savedSession?.tabs || [];
   const data = { version: 1, tabs, activeSpaceID: normal?.spaceID || library.savedSession?.activeSpaceID, activeID: normal?.activeID || library.savedSession?.activeID, closed: closedTabs.slice(-30), activeBySpace: normal ? Object.fromEntries(normal.lastActive) : library.savedSession?.activeBySpace || {} };
   core.atomicWrite(library.sessionFile, data); library.savedSession = data;
 }
 function recordHistory(tab) {
-  if (tab.window.private || !isHTTP(tab.url)) return;
+  if (tab.window.private || tab.window.little || !isHTTP(tab.url)) return;
   const entry = { id: core.id(), url: tab.url, title: tab.title, visitedAt: core.now() };
   library.history = [entry, ...(library.history || []).filter(x => x.url !== entry.url)].slice(0, 10000);
   core.atomicWrite(library.historyFile, library.history);
 }
 function setBounds(view, bounds) { view.setBounds(Object.fromEntries(Object.entries(bounds).map(([key, value]) => [key, Math.max(0, Math.round(value))]))); }
+function closeDockedDevTools(win, wc = null) {
+  if (wc) wc.closeDevTools();
+  if (win.devtoolsTarget === wc || !wc) win.devtoolsTarget = null;
+  if (!win.devtoolsDock) return;
+  win.contentView.removeChildView(win.devtoolsDock);
+  if (!win.devtoolsDock.webContents.isDestroyed()) win.devtoolsDock.webContents.close();
+  win.devtoolsDock = null;
+}
+function toggleDevTools(win) {
+  const target = commandTarget(win), wc = target.wc;
+  if (wc.isDevToolsOpened() || win.devtoolsTarget === wc) { wc.closeDevTools(); closeDockedDevTools(win); win.devtoolsTarget = null; return; }
+  if (library.settings.devtoolsMode !== 'right' || target.targetKind !== 'tab') { wc.openDevTools({ mode: 'detach' }); return; }
+  closeDockedDevTools(win);
+  const dock = new WebContentsView({ webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } });
+  win.contentView.addChildView(dock); win.devtoolsDock = dock;
+  dock.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  dock.webContents.on('will-navigate', event => event.preventDefault());
+  dock.webContents.on('destroyed', () => { if (win.devtoolsDock === dock) win.devtoolsDock = null; });
+  wc.setDevToolsWebContents(dock.webContents);
+  win.devtoolsTarget = wc;
+  wc.openDevTools({ mode: 'detach' });
+  layout(win);
+}
 function layout(win) {
   if (win.isDestroyed()) return;
   const [width, height] = win.getContentSize(), side = win.sidebarVisible ? win.sidebarWidth : 0;
   const inset = library.settings.frameInset ? 8 : 0, gap = 8, y = 40 + inset + (win.overlay === 'find' ? 48 : 0);
-  const available = Math.max(0, width - side - inset * 2), first = win.tabs.get(win.activeID), second = win.tabs.get(win.splitID);
+  const dock = win.devtoolsDock;
+  const available = Math.max(0, width - side - inset * 2 - (dock ? Math.round(width * 0.48) : 0)), first = win.tabs.get(win.activeID), second = win.tabs.get(win.splitID);
   const hidden = !!win.overlay && win.overlay !== 'find';
   // 阅读视图占用整块页面区域；此时底层网页保持隐藏，命令只作用于文章本身。
   for (const tab of win.tabs.values()) if (tab.view) tab.view.setVisible(!hidden && !win.reader && !!tab.url && (tab.id === win.activeID || tab.id === win.splitID));
@@ -158,6 +240,7 @@ function layout(win) {
   if (second?.view) setBounds(second.view, { x: side + inset + (available - gap) * win.splitRatio + gap, y, width: (available - gap) * (1 - win.splitRatio), height: Math.max(0, height - y - inset) });
   if (win.readerView) { setBounds(win.readerView, { x: side + inset, y, width: available, height: Math.max(0, height - y - inset) }); win.readerView.setVisible(!hidden); }
   if (win.peek) { win.peek.setVisible(!hidden); setBounds(win.peek, { x: side + (width - side) * .1, y: height * .1 + 36, width: (width - side) * .8, height: height * .8 - 36 }); }
+  if (dock) setBounds(dock, { x: width - inset - Math.round(width * 0.48), y, width: Math.round(width * 0.48), height: Math.max(0, height - y - inset) });
   setBounds(win.shell, { x: 0, y: 0, width, height });
 }
 function addPageView(win, tab, selected = false) {
@@ -165,11 +248,21 @@ function addPageView(win, tab, selected = false) {
   win.contentView.addChildView(tab.view); tab.view.setVisible(selected); tab.view.setBackgroundColor('#ffffffff'); tab.view.setBorderRadius(8);
 }
 function removePageView(win, tab) { if (!tab.view) return; win.contentView.removeChildView(tab.view); tab.view.setVisible(false); }
-function createWindow(isPrivate = false, url = '') {
-  const win = new BaseWindow({ width: 1280, height: 820, minWidth: 760, minHeight: 500, title: isPrivate ? 'Arco · 无痕窗口' : 'Arco', titleBarStyle: 'hidden', trafficLightPosition: { x: 12, y: 12 }, backgroundColor: '#dce7f7' });
-  Object.assign(win, { tabs: new Map(), activeID: null, splitID: null, splitRatio: 0.5, focusedPaneID: null, peekFocused: false, find: null, httpAuth: null, httpAuthQueue: [], spaceID: library.data.spaces[0].id, private: isPrivate, sidebarVisible: true, sidebarWidth: library.settings.sidebarWidth, capture: null, peek: null, peekURL: '', peekListeners: null, reader: false, readerView: null, overlay: '', snapshots: [], lastActive: new Map(), partition: isPrivate ? 'arco-private-' + core.id() : normalSession });
+function littleWindowOptions(owner) {
+  const area = screen.getDisplayMatching(owner.getBounds()).workArea;
+  const maxWidth = Math.round(area.width * 0.8), maxHeight = Math.round(area.height * 0.8);
+  let height = maxHeight, width = Math.round(height * 560 / 640);
+  if (width > maxWidth) { width = maxWidth; height = Math.round(width * 640 / 560); }
+  const x = owner.isDestroyed() ? undefined : Math.round(owner.getBounds().x + Math.max(0, (owner.getBounds().width - width) / 2));
+  const y = Math.round(area.y + (area.height - height) / 2);
+  return { width, height, x, y, minWidth: 360, minHeight: 360, title: 'Arco · 小窗口', titleBarStyle: 'default', backgroundColor: '#dce7f7' };
+}
+function createWindow(isPrivate = false, url = '', { little = false, owner = null } = {}) {
+  const options = little ? littleWindowOptions(owner) : { width: 1280, height: 820, minWidth: 760, minHeight: 500, title: isPrivate ? 'Arco · 无痕窗口' : 'Arco', titleBarStyle: 'hidden', trafficLightPosition: { x: 12, y: 12 }, backgroundColor: '#dce7f7' };
+  const win = new BaseWindow(options);
+  Object.assign(win, { tabs: new Map(), activeID: null, splitID: null, splitRatio: 0.5, focusedPaneID: null, peekFocused: false, find: null, httpAuth: null, httpAuthQueue: [], spaceID: library.data.spaces[0].id, private: isPrivate, little, sidebarVisible: !little, sidebarWidth: library.settings.sidebarWidth, capture: null, peek: null, peekURL: '', peekListeners: null, reader: false, readerView: null, overlay: '', snapshots: [], lastActive: new Map(), partition: isPrivate ? 'arco-private-' + core.id() : normalSession });
   if (isPrivate) setupSession(session.fromPartition(win.partition));
-  if (!isPrivate) {
+  if (!isPrivate && !little) {
     sessionReady = false;
     const loaded = loadSession();
     const history = core.loadJSON(library.historyFile, [], x => Array.isArray(x) ? x : (() => { throw new Error('历史格式不正确'); })());
@@ -185,10 +278,10 @@ function createWindow(isPrivate = false, url = '') {
   win.shell.webContents.once('did-finish-load', () => sendState(win));
   win.shell.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.shell.webContents.on('will-navigate', event => event.preventDefault());
-  win.on('resize', () => layout(win)); win.on('closed', () => { cancelAuthForWindow(win); clearPasskeyRequests(null, win); for (const tab of win.tabs.values()) if (tab.view && !tab.view.webContents.isDestroyed()) tab.view.webContents.close(); if (win.readerView && !win.readerView.webContents.isDestroyed()) win.readerView.webContents.close(); win.peek?.webContents.close(); if (!win.shell.webContents.isDestroyed()) win.shell.webContents.close(); for (const [id, owner] of popupOwners) if (owner.window === win) popupOwners.delete(id); for (const [id, d] of downloads) if (d.private && d.windowID === win.id) downloads.delete(id); windows.delete(win); });
-  win.on('close', () => { if (!win.private) saveSession(); });
+  win.on('resize', () => layout(win)); win.on('closed', () => { closeDockedDevTools(win); cancelAuthForWindow(win); clearPasskeyRequests(null, win); for (const tab of win.tabs.values()) if (tab.view && !tab.view.webContents.isDestroyed()) tab.view.webContents.close(); if (win.readerView && !win.readerView.webContents.isDestroyed()) win.readerView.webContents.close(); win.peek?.webContents.close(); if (!win.shell.webContents.isDestroyed()) win.shell.webContents.close(); for (const [id, owner] of popupOwners) if (owner.window === win) popupOwners.delete(id); for (const [id, d] of downloads) if (d.private && d.windowID === win.id) downloads.delete(id); windows.delete(win); });
+  win.on('close', () => { if (!win.private && !win.little) saveSession(); });
   windows.add(win); layout(win);
-  if (isPrivate) createTab(win, url, { select: true });
+  if (isPrivate || little) createTab(win, url, { select: true });
   else {
     // 会话恢复只建立记录；未激活的标签页第一次切换过去时才创建渲染进程，避免启动就拉起全部网站。
     for (const saved of library.savedSession.tabs.filter(t => library.space(t.spaceID) && ![...windows].some(w => w !== win && w.tabs.has(t.id)))) createTab(win, saved.url, { ...saved, asleep: true, select: false });
@@ -224,7 +317,7 @@ function createTab(win, rawURL, options = {}) {
   if (options.select !== false) selectTab(win, id);
   else if (tab.view) { addPageView(win, tab, false); if (!win.private && win.tabs.has(win.activeID)) extensionHost.select(win.tabs.get(win.activeID).view.webContents); sendState(win); }
   else sendState(win);
-  if (!win.private) saveSession(); return tab;
+  if (!win.private && !win.little) saveSession(); return tab;
 }
 // window.open(url, name, 'width=..,height=..') 这类弹窗必须保留 window.opener，否则三方登录/支付的 postMessage 回传就断了。
 function popupSize(features) {
@@ -312,7 +405,11 @@ function attachTab(tab, initialExtensionID = '') {
     const source = new URL(wc.getURL() || 'about:blank');
     return source.protocol === 'chrome-extension:' ? source.hostname : source.href === 'about:blank' ? initialExtensionID : '';
   };
-  wc.setWindowOpenHandler(details => pageOpenResponse(win, details, ownerID()));
+  // Little Arc 里的普通链接仍在本窗口导航；只有页面明确要求新窗口时才沿用主窗口的弹窗规则。
+  wc.setWindowOpenHandler(details => {
+    if (win.little && details.disposition === 'foreground-tab') { wc.loadURL(details.url).catch(() => {}); return { action: 'deny' }; }
+    return pageOpenResponse(win, details, ownerID());
+  });
   wc.on('did-create-window', child => { const extensionID = ownerID(); if (extensionID) attachExtensionWindow(child, extensionID); else registerWebsitePopup(child, win); });
   const guardNavigation = (event, url) => {
     if (!isHTTP(url)) {
@@ -320,7 +417,13 @@ function attachTab(tab, initialExtensionID = '') {
       event.preventDefault(); try { if (ALLOWED_EXTERNAL.has(new URL(url).protocol)) confirmExternal(win, url); } catch {}
     }
   };
-  wc.on('will-navigate', guardNavigation); wc.on('will-redirect', guardNavigation);
+  wc.on('will-navigate', (event, url) => {
+    const pending = tab.pendingLittleLink;
+    tab.pendingLittleLink = null;
+    if (pending && pending.url === url && pending.generation === tab.generation) { event.preventDefault(); openLittleWindow(win, pending.url); return; }
+    guardNavigation(event, url);
+  });
+  wc.on('will-redirect', guardNavigation);
   // 商店安装栏的哨兵地址：只有当前页面确实是同一个扩展的商店详情页时才接受。
   // 注意读 wc.getURL()：did-start-navigation 已经把 tab.url 改成了哨兵地址。
   wc.on('will-navigate', (event, url) => {
@@ -333,13 +436,15 @@ function attachTab(tab, initialExtensionID = '') {
   });
   wc.on('did-start-navigation', (event, url, isInPlace, isMainFrame) => {
     if (!isMainFrame || isInPlace) return;
+    if (tab.pendingLittleLink) return;
     tab.url = url; tab.generation = (tab.generation || 0) + 1;
+    tab.translation = null;
     // Reader 只属于发起它的标签页：无关后台标签页的导航不能打断正在阅读的文章。
     if (win.reader && win.readerSource?.tabID === tab.id) closeReader(win, false);
     sendState(win);
   });
-  wc.on('did-navigate', (_, url) => { tab.loadFailed = false; tab.url = url; sendState(win); saveSession(); });
-  wc.on('did-navigate-in-page', (_, url, isMainFrame) => { if (isMainFrame) { tab.url = url; recordHistory(tab); offerStoreInstall(tab); sendState(win); saveSession(); } });
+  wc.on('did-navigate', (_, url) => { tab.loadFailed = false; tab.url = url; sendState(win); if (!win.little) saveSession(); });
+  wc.on('did-navigate-in-page', (_, url, isMainFrame) => { if (isMainFrame) { tab.url = url; recordHistory(tab); offerStoreInstall(tab); sendState(win); if (!win.little) saveSession(); } });
   wc.on('page-title-updated', (event, title) => { event.preventDefault(); tab.title = title.slice(0, 1000) || '新标签页'; sendState(win); });
   wc.on('page-favicon-updated', (_, icons) => { tab.favicon = icons[0] || ''; if (!win.private && tab.favicon) adoptFavoriteIcon(tab); sendState(win); });
   wc.on('did-finish-load', () => { tab.url = wc.getURL(); recordHistory(tab); offerStoreInstall(tab); sendState(win); });
@@ -352,6 +457,7 @@ function attachTab(tab, initialExtensionID = '') {
   wc.on('audio-state-changed', () => sendState(win));
   wc.on('ipc-message', (event, channel, payload) => {
     if (event.senderFrame !== wc.mainFrame || !win.tabs.has(tab.id)) return;
+    if (channel === 'arco:page-link') { if (!win.little && library.settings.linkOpenMode === 'little' && typeof payload?.url === 'string' && isHTTP(payload.url)) tab.pendingLittleLink = { url: payload.url, generation: tab.generation }; return; }
     if (channel === 'arco:page-peek') { if (typeof payload?.url === 'string' && isHTTP(payload.url)) openPeek(win, payload.url); return; }
     if (channel === 'arco:page-split') { const other=win.tabs.get(payload?.id);if(other&&other.spaceID===win.spaceID&&other.id!==win.activeID){if(win.splitID)toggleSplit(win);toggleSplit(win,other.id);} return; }
     if (channel !== 'arco:page-password' || win.private) return;
@@ -383,7 +489,7 @@ function attachTab(tab, initialExtensionID = '') {
   });
 }
 function extensionBrowser(windowID) {
-  const ordinary = [...windows].filter(win => !win.private && !win.isDestroyed());
+  const ordinary = [...windows].filter(win => !win.private && !win.little && !win.isDestroyed());
   return ordinary.find(win => win.id === windowID) || ordinary.find(win => win.isFocused()) || ordinary[0] || createWindow(false);
 }
 function createExtensionTab(details) {
@@ -495,11 +601,13 @@ async function installFromStore(win, input) {
 function safeCaptureOrigin(value) { try { const url = new URL(core.webURL(value)); if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return null; return url.origin; } catch { return null; } }
 function selectTab(win, tabID) {
   const tab = win.tabs.get(tabID); if (!tab) error('标签页不存在');
+  const previous = win.tabs.get(win.activeID);
+  if (previous && previous !== tab && previous.view && !previous.view.webContents.isDestroyed()) { previous.view.webContents.closeDevTools(); closeDockedDevTools(win, previous.view.webContents); }
   resetFind(win, false); closePeek(win); closeReader(win, false);
   for (const other of win.tabs.values()) removePageView(win, other);
   win.activeID = tabID; win.focusedPaneID = tabID; win.peekFocused = false; win.spaceID = tab.spaceID; win.lastActive.set(tab.spaceID,tabID); win.splitID = null;
   if (!tab.view) wakeTab(win, tab);
-  addPageView(win, tab, true); if (!win.private) extensionHost.select(tab.view.webContents); layout(win); sendState(win); saveSession();
+  addPageView(win, tab, true); if (!win.private) extensionHost.select(tab.view.webContents); layout(win); sendState(win); if (!win.little) saveSession();
   if (!win.overlay) (tab.url ? tab.view.webContents : win.shell.webContents).focus();
 }
 function switchSpace(win, spaceID) {
@@ -517,8 +625,9 @@ function closeTab(win, tabID) {
   // 关闭 Reader 的来源标签页才退出文章；关闭无关后台标签页不影响阅读。
   if (win.reader && win.readerSource?.tabID === tabID) closeReader(win, false);
   if (win.find?.targetKind === 'tab' && win.find.targetID === tabID) resetFind(win, false);
-  const wasActive = win.activeID === tabID; win.tabs.delete(tabID); removePageView(win, tab); if (tab.view) tab.view.webContents.close();
-  if (!win.private && isHTTP(tab.url)) closedTabs.push({ url: tab.url, title: tab.title, spaceID: tab.spaceID, closedAt: core.now() });
+  const wasActive = win.activeID === tabID; if (tab.view && !tab.view.webContents.isDestroyed() && tab.view.webContents.isDevToolsOpened()) { tab.view.webContents.closeDevTools(); closeDockedDevTools(win); }
+  win.tabs.delete(tabID); removePageView(win, tab); if (tab.view) tab.view.webContents.close();
+  if (!win.private && !win.little && isHTTP(tab.url)) closedTabs.push({ url: tab.url, title: tab.title, spaceID: tab.spaceID, closedAt: core.now() });
   if (win.splitID === tabID) win.splitID = null;
   if (win.focusedPaneID === tabID) win.focusedPaneID = win.activeID && win.tabs.has(win.activeID) ? win.activeID : null;
   if (wasActive) {
@@ -526,10 +635,10 @@ function closeTab(win, tabID) {
     // 关闭聚焦的次级窗格时，另一个窗格接管为主窗格，而不是跳到空间里第一个标签页。
     const split = win.tabs.get(win.splitID);
     const next = split && split.spaceID === win.spaceID ? split : [...win.tabs.values()].find(t => t.spaceID === win.spaceID);
-    if (next) selectTab(win, next.id); else createTab(win, '', { select: true });
+    if (next) selectTab(win, next.id); else if (win.little) win.close(); else createTab(win, '', { select: true });
   }
   else if (!win.focusedPaneID) win.focusedPaneID = win.activeID;
-  sendState(win); saveSession();
+  sendState(win); if (!win.little) saveSession();
 }
 function reopenTab(win) { const closed = closedTabs.pop(); if (closed) createTab(win, closed.url, { spaceID: library.space(closed.spaceID)?.id || win.spaceID, title: closed.title, select: true }); }
 function toggleSplit(win, tabID) {
@@ -580,6 +689,15 @@ function closePeek(win) {
     detachPeekListeners(win); win.contentView.removeChildView(win.peek); win.peek.webContents.close();
     win.peek = null; win.peekURL = ''; win.peekFocused = false; sendState(win);
   }
+}
+function promoteLittleWindow(win) {
+  if (!win.little) error('当前窗口不是小窗口');
+  const tab = findTab(win), url = tab.view?.webContents.getURL() || tab.url;
+  if (!isHTTP(url)) error('请先打开一个网页');
+  const owner = win.littleOwner && !win.littleOwner.isDestroyed() ? win.littleOwner : [...windows].find(w => !w.private && !w.little && !w.isDestroyed()) || createWindow(false);
+  createTab(owner, url, { spaceID: owner.spaceID, select: true });
+  if (owner.isMinimized()) owner.restore();
+  owner.focus(); win.close();
 }
 function promotePeek(win) {
   if (!win.peek) return;
@@ -795,7 +913,7 @@ function adoptFavoriteIcon(tab) {
   iconAttempts.add(favorite.id);
   cacheFavoriteIcon({ ...favorite, favicon: tab.favicon }).catch(() => {});
 }
-const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'refresh-favorite-icon', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'migrate-browser-data', 'import-browser', 'chrome-extensions', 'import-chrome-extensions', 'install-extension-store', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-delete', 'history-clear', 'save-page', 'clear-site-data', 'default-browser', 'download-open', 'download-reveal', 'download-cancel', 'download-pause', 'download-resume', 'find', 'find-stop', 'passkey-cancel', 'http-auth-submit', 'http-auth-cancel', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'open-system-passwords', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'extension-list', 'extension-toggle', 'extension-popup', 'copy', 'menu', 'confirm-clear']);
+const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'refresh-favorite-icon', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'migrate-browser-data', 'import-browser', 'chrome-extensions', 'import-chrome-extensions', 'install-extension-store', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-delete', 'history-clear', 'save-page', 'clear-site-data', 'default-browser', 'download-open', 'download-reveal', 'download-cancel', 'download-pause', 'download-resume', 'find', 'find-stop', 'passkey-cancel', 'http-auth-submit', 'http-auth-cancel', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'little-window', 'little-promote', 'little-close', 'translate', 'open-system-passwords', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'extension-list', 'extension-toggle', 'extension-popup', 'copy', 'menu', 'confirm-clear']);
 function trustedWindow(event) {
   const win = [...windows].find(w => w.shell.webContents === event.sender);
   if (!win || event.senderFrame !== win.shell.webContents.mainFrame || event.senderFrame.url !== pathToFileURL(path.join(__dirname, 'shell.html')).href) error('未授权的界面请求');
@@ -904,6 +1022,8 @@ ipcMain.handle('arco:invoke', async (event, message) => {
           if (a.engine && core.ENGINES[a.engine]) settings.engine = a.engine;
           if (typeof a.trackerBlocking === 'boolean') settings.trackerBlocking = a.trackerBlocking;
           if (['system', 'light', 'dark'].includes(a.theme)) settings.theme = a.theme;
+          if (['detach', 'right'].includes(a.devtoolsMode)) settings.devtoolsMode = a.devtoolsMode;
+          if (['tab', 'little'].includes(a.linkOpenMode)) settings.linkOpenMode = a.linkOpenMode;
           if (typeof a.frameInset === 'boolean') settings.frameInset = a.frameInset;
         });
         nativeTheme.themeSource = library.settings.theme;
@@ -965,7 +1085,7 @@ ipcMain.handle('arco:invoke', async (event, message) => {
       case 'zoom': { const wc = commandTarget(win).wc; if (a.reset) wc.send('arco:reset-visual-zoom'); wc.setZoomFactor(a.reset ? 1 : Math.max(0.25, Math.min(5, wc.getZoomFactor() + (Number(a.delta) || 0)))); sendState(win); break; }
       case 'print': commandTarget(win).wc.print({}); break;
       case 'pdf': { const result = await dialog.showSaveDialog(win, { defaultPath: 'Arco-Page.pdf', filters: [{ name: 'PDF', extensions: ['pdf'] }] }); if (result.filePath) fs.writeFileSync(result.filePath, await commandTarget(win).wc.printToPDF({ printBackground: true })); break; }
-      case 'devtools': commandTarget(win).wc.openDevTools({ mode: 'detach' }); break;
+      case 'devtools': toggleDevTools(win); break;
       case 'screenshot': { const result = await dialog.showSaveDialog(win, { defaultPath: 'Arco-Screenshot.png', filters: [{ name: 'PNG', extensions: ['png'] }] }); if (result.filePath) { const image = await commandTarget(win).wc.capturePage(); fs.writeFileSync(result.filePath, image.toPNG()); } break; }
       case 'reader': {
         if (win.reader) { closeReader(win); return null; }
@@ -975,6 +1095,10 @@ ipcMain.handle('arco:invoke', async (event, message) => {
         return openReaderView(win, extracted.article, extracted.tab);
       }
       case 'private-window': createWindow(true); break;
+      case 'little-window': return openLittleWindow(win);
+      case 'little-promote': return promoteLittleWindow(win);
+      case 'little-close': if (win.little) win.close(); break;
+      case 'translate': return await translateTab(win);
       case 'open-system-passwords': {
         const failure = await shell.openPath('/System/Applications/Passwords.app');
         if (failure) error(`无法打开 Apple“密码”：${failure}`);
@@ -1298,6 +1422,16 @@ ipcMain.on('arco:passkey-settled', (event, payload) => {
   passkeyRequests.delete(request.key);
   if (!request.win.isDestroyed()) sendState(request.win);
 });
+
+ipcMain.on('arco:page-translate-result', (event, payload) => {
+  const wc = event.sender, id = payload?.id;
+  if (wc.isDestroyed() || event.senderFrame !== wc.mainFrame || typeof id !== 'string' || !id || id.length > 128) return;
+  const request = translationRequests.get(id);
+  if (!request || request.wc !== wc) return;
+  translationRequests.delete(id); clearTimeout(request.timer);
+  if (payload.error) request.reject(new Error(String(payload.error).slice(0, 300)));
+  else request.resolve(payload);
+});
 process.on('unhandledRejection', error => { console.error('Arco 操作失败:', error?.message || '未知错误'); });
 app.on('login', handleLogin);
 app.whenReady().then(async () => {
@@ -1305,6 +1439,12 @@ app.whenReady().then(async () => {
   if (!primaryInstance) return;
   fs.mkdirSync(userData, { recursive: true, mode: 0o700 });
   library = new Library(userData, broadcast); vault = testMode ? new MemoryVault() : new EncryptedVault(userData);
+  translator = new Translator();
+  if (testMode) translator = {
+    async detect(text) { return { source: 'en', text }; },
+    async translate(source, texts) { return { texts: texts.map(text => '译:' + text) }; },
+    dispose() {}
+  };
   loadDownloadRecords();
   passwordSync = new PasswordSync(() => library.settings.syncFolder, library.settings.deviceID);
   setupSession(session.fromPartition(normalSession));
@@ -1329,11 +1469,11 @@ app.whenReady().then(async () => {
   nativeTheme.themeSource = library.settings.theme || 'system';
   installMenu();
   await library.loadExtensions();
-  if (![...windows].some(win => !win.private)) createWindow(false);
-  app.on('activate', () => { if (![...windows].some(w => !w.private)) createWindow(false); });
+  if (![...windows].some(win => !win.private && !win.little)) createWindow(false);
+  app.on('activate', () => { if (![...windows].some(w => !w.private && !w.little)) createWindow(false); });
   launched = true; for (const url of pendingURLs.splice(0)) openExternalURL(url);
 });
-app.on('before-quit', () => { saveSession(); library?.save(); passwordSync?.lock(); vault?.dispose(); });
+app.on('before-quit', () => { saveSession(); library?.save(); passwordSync?.lock(); translator?.dispose(); vault?.dispose(); });
 async function captureComposite(win) {
   const [width,height]=win.getContentSize();
   const base=(await win.shell.webContents.capturePage()).resize({width,height});
@@ -1363,7 +1503,9 @@ if (testMode) {
     if (action === 'focus-page') { awakeTab(win).view.webContents.focus(); return true; }
     if (action === 'evaluate') return awakeTab(win, payload?.id).view.webContents.executeJavaScript(payload.script, true);
     if (action === 'page-menu') { const template = pageMenu(win, awakeTab(win, payload?.id).view.webContents, payload.params || {}); if (payload.click) template.find(item => item.label === payload.click).click(); return template.map(item => item.label || item.type); }
-    if (action === 'windows') return [...windows].map(w => ({ private: w.private, id: w.id }));
+    if (action === 'windows') return [...windows].map(w => ({ private: w.private, id: w.id, little: !!w.little }));
+    if (action === 'devtools-open') return commandTarget(win).wc.isDevToolsOpened() || win.devtoolsTarget === commandTarget(win).wc;
+    if (action === 'devtools-contents') { const dock = win.devtoolsDock; return { id: dock?.webContents.id || -1, mode: dock && !dock.webContents.isDestroyed() && win.contentView.children.includes(dock) ? 'right' : 'detach' }; }
     if (action === 'capture') { if(!/^[\w-]+$/.test(payload.name))throw Error('Invalid name');const image=await captureComposite(win);fs.mkdirSync(path.join(__dirname,'..','artifacts'),{recursive:true});fs.writeFileSync(path.join(__dirname,'..','artifacts',payload.name+'.png'),image.toPNG());return true; }
     if (action === 'fixture-secret') { const credential = await vault.save(payload); return credential.id; }
     if (action === 'arm-auth-gate') {
