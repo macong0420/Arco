@@ -55,23 +55,30 @@ async function assertEventually(check) { for(let i=0;i<100;i++){if(await check()
 const fixture = '<!doctype html><title>Arco Fixture</title><link rel="icon" href="/ui-icon.svg"><h1>Real Chromium fixture</h1><form action="/welcome"><input name="username" autocomplete="username" value="alice"><input name="password" type="password" autocomplete="current-password"><button type="submit">Sign in</button></form><a id="peek-link" href="/second">Second page</a>';
 test('real app: Chromium, overlays, spaces, split, passwords, private isolation and restart', {timeout:120000}, async t=>{
   const requestCounts=new Map(),authAttempts=[],authChallenges=[],authSuccesses=[];
+  let releaseLogin,releaseBasic;
+  const loginGate=new Promise(resolve=>{releaseLogin=resolve;}),basicGate=new Promise(resolve=>{releaseBasic=resolve;});
   const count=request=>requestCounts.set(request.url.split('?')[0],(requestCounts.get(request.url.split('?')[0])||0)+1);
-  server=http.createServer((req,res)=>{
+  server=http.createServer(async(req,res)=>{
     count(req);
     if(req.url.startsWith('/ui-icon.svg')){res.setHeader('Content-Type','image/svg+xml');return res.end('<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><rect width="128" height="128" rx="28" fill="#4e78ca"/><path d="M32 92V60a32 32 0 0 1 64 0v32M44 76h40" fill="none" stroke="white" stroke-width="12"/></svg>');}
     if(req.url.startsWith('/fixture.txt')){res.setHeader('Content-Type','text/plain');res.setHeader('Content-Disposition','attachment; filename="arco-popup.txt"');return res.end('popup download fixture');}
     if(req.url.startsWith('/basic-')){
       const path=req.url.split('?')[0];
-      const expected={ '/basic-tab':['tab-user','tab-secret'], '/basic-popup':['popup-user','popup-secret'], '/basic-private':['private-user','private-secret'], '/basic-cancel':['never','never'], '/basic-close':['never','never'] }[path];
+      const expected={ '/basic-tab':['tab-user','tab-secret'], '/basic-popup':['popup-user','popup-secret'], '/basic-private':['private-user','private-secret'], '/basic-cancel':['never','never'], '/basic-close':['never','never'], '/basic-queue-1':['queue-one','queue-secret'], '/basic-queue-2':['queue-two','queue-secret'] }[path];
       // 每个受保护区用独立 realm：Chromium 按 origin+realm 缓存认证，共用 realm 会让“取消”自动重放旧凭据。
-      const realm={ '/basic-tab':'Arco tab', '/basic-popup':'Arco popup', '/basic-private':'Arco private', '/basic-cancel':'Arco cancel', '/basic-close':'Arco close' }[path]||'Arco fixture';
+      const realm={ '/basic-tab':'Arco tab', '/basic-popup':'Arco popup', '/basic-private':'Arco private', '/basic-cancel':'Arco cancel', '/basic-close':'Arco close', '/basic-queue-1':'Arco queue one', '/basic-queue-2':'Arco queue two' }[path]||'Arco fixture';
       const header=req.headers.authorization||'',decoded=header.startsWith('Basic ')?Buffer.from(header.slice(6),'base64').toString():'';
       const [username,password]=decoded.split(':');authAttempts.push({path,username,password:password?'provided':'',realm});
       if(username!==expected[0]||password!==expected[1]){authChallenges.push({path,username});res.writeHead(401,{'WWW-Authenticate':`Basic realm="${realm}"`,'Content-Type':'text/html; charset=utf-8'});return res.end('<title>Auth Required</title>');}
       authSuccesses.push({path,username});
+      if(path==='/basic-tab')await basicGate;
       res.setHeader('Content-Type','text/html; charset=utf-8');return res.end(`<title>Authenticated ${username}</title><h1>Authenticated ${username}</h1>`);
     }
     res.setHeader('Content-Type','text/html; charset=utf-8');
+    if(req.url==='/account'){await loginGate;return res.end('<title>Signed In</title><h1>Signed in</h1>');}
+    if(req.url==='/login'&&req.method==='GET')return res.end('<title>Login</title><form method="post" action="/login"><input name="username" autocomplete="username" value="alice"><input name="password" type="password" autocomplete="current-password"><button type="submit">Sign in</button></form>');
+    if(req.url==='/login'&&req.method==='POST'){res.writeHead(302,{Location:'/auth/1'});return res.end();}
+    if(/^\/auth\/[1-5]$/.test(req.url)){const step=Number(req.url.at(-1));res.writeHead(302,{Location:step===5?'/account':`/auth/${step+1}`});return res.end();}
     if(req.url.startsWith('/welcome'))return res.end('<title>Welcome</title><h1>Signed in</h1>');
     if(req.url.startsWith('/second'))return res.end('<title>Second Fixture</title><h1>Second page</h1>');
     if(req.url.startsWith('/split-left'))return res.end('<title>Split Left</title><body>left unique findtarget</body>');
@@ -100,7 +107,7 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     res.end(fixture);
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve)); origin='http://127.0.0.1:'+server.address().port;
-  t.after(async()=>{await close();await new Promise(resolve=>server.close(resolve));fs.rmSync(profile,{recursive:true,force:true});});
+  t.after(async()=>{releaseLogin();releaseBasic();await close();await new Promise(resolve=>server.close(resolve));fs.rmSync(profile,{recursive:true,force:true});});
   await launch();
   await app.evaluate(({session},directory)=>session.fromPartition('persist:arco').setDownloadPath(directory),profile);
   await t.test('Chromium pages are real isolated targets',async()=>{
@@ -415,8 +422,25 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     await shell.locator('#http-auth-form [name="username"]').fill('tab-user');
     await shell.locator('#http-auth-form [name="password"]').fill('tab-secret');
     await shell.getByRole('button',{name:'登录',exact:true}).click();
+    await assertEventually(async()=>(await inspect('views')).some(view=>view.visible));
+    releaseBasic();
     const authenticated=await remote(origin+'/basic-tab'); await authenticated.waitForFunction(()=>document.title==='Authenticated tab-user');
     await waitState(s=>!s.httpAuth);
+    await Promise.all([invoke('new-tab',{url:origin+'/basic-queue-1'}),invoke('new-tab',{url:origin+'/basic-queue-2'})]);
+    await waitState(s=>(s.httpAuthQueue||s.httpAuth));
+    await assertEventually(async()=>(await inspect('auth-queue')).length===2);
+    await shell.locator('#http-auth-form [name="username"]').fill('queue-one');
+    await shell.locator('#http-auth-form [name="password"]').fill('queue-secret');
+    await shell.getByRole('button',{name:'登录',exact:true}).click();
+    await waitState(s=>s.httpAuth?.host==='127.0.0.1');
+    await assertEventually(async()=>(await inspect('auth-queue')).length===1);
+    await shell.locator('#http-auth-form').waitFor({state:'visible'});
+    await shell.locator('#http-auth-form [name="username"]').fill('queue-two');
+    await shell.locator('#http-auth-form [name="password"]').fill('queue-secret');
+    await shell.getByRole('button',{name:'登录',exact:true}).click();
+    await waitState(s=>!s.httpAuth);
+    for(const url of [origin+'/basic-queue-1',origin+'/basic-queue-2'])await remote(url);
+    for(const tab of (await inspect('state')).tabs.filter(tab=>/\/basic-queue-[12]$/.test(tab.url)))await invoke('close-tab',{id:tab.id});
     await invoke('new-tab',{url:origin+'/basic-cancel'});
     await shell.locator('#http-auth-form').waitFor({state:'visible'});
     await shell.getByRole('button',{name:'取消',exact:true}).click(); await waitState(s=>!s.httpAuth);
@@ -447,19 +471,66 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     // Chromium 会按来源重放已知凭据（浏览器正常行为，不禁用）。真实服务端只应在三处接受登录：
     // 每个导航恰好质询一次（401），取消/关闭后再也没有成功认证，说明回调各完成一次。
     for(const path of ['/basic-tab','/basic-cancel','/basic-close','/basic-popup','/basic-private'])assert.equal(authChallenges.filter(x=>x.path===path).length,1,path+' must be challenged exactly once');
-    assert.deepEqual(authSuccesses.map(x=>[x.path,x.username]),[['/basic-tab','tab-user'],['/basic-popup','popup-user'],['/basic-private','private-user']]);
+    assert.deepEqual(authSuccesses.map(x=>[x.path,x.username]),[['/basic-tab','tab-user'],['/basic-queue-1','queue-one'],['/basic-queue-2','queue-two'],['/basic-popup','popup-user'],['/basic-private','private-user']]);
     // 关掉本子测试创建的认证页，避免重启后恢复出新的认证提示影响后续用例。
     for(const tab of (await inspect('state')).tabs.filter(tab=>tab.url&&tab.url.includes('/basic-')))await invoke('close-tab',{id:tab.id});
     await waitState(s=>s.tabs.every(tab=>!tab.url.includes('/basic-')));
+  });
+  await t.test('form login keeps redirect pages visible behind the password offer',async()=>{
+    await invoke('new-tab',{url:origin+'/login'});const page=await remote(origin+'/login');
+    await page.locator('input[type=password]').fill('redirect-test-password');
+    await page.locator('button[type=submit]').click({noWaitAfter:true});
+    await assertEventually(async()=>requestCounts.has('/auth/1'));
+    await waitState(s=>!!s.capture&&s.tabs.some(tab=>tab.url===origin+'/login'));
+    await assertEventually(async()=>(await inspect('views')).some(view=>view.visible));
+    releaseLogin();
+    await assertEventually(async()=>(await app.windows()).some(page=>page.url()===origin+'/account'));
+    await page.waitForFunction(()=>document.title==='Signed In');
+    await assertEventually(async()=>(await inspect('views')).some(view=>view.visible&&view.url===origin+'/account'));
+    await shell.locator('[data-action="capture-dismiss"]').click();await waitState(s=>!s.capture);
+    assert.equal(await shell.locator('#overlay-root').isVisible(),false);
+  });
+  await t.test('history is queried only when needed instead of broadcast with every navigation',async()=>{
+    await invoke('navigate',{input:origin+'/history-search-fixture'});const page=await remote(origin+'/history-search-fixture');
+    assert.equal('history' in (await inspect('state')),false);
+    const entries=await invoke('history-search',{query:'history-search-fixture'});
+    assert(entries.some(entry=>entry.url===origin+'/history-search-fixture'));
+    await app.evaluate(({Menu})=>Menu.getApplicationMenu().items.find(item=>item.label==='浏览').submenu.items.find(item=>item.label==='浏览历史').click());
+    await shell.locator('#history-filter').waitFor();await shell.locator('#history-list').getByText('Arco Fixture').first().waitFor();
+    await shell.locator('#history-filter').fill('delayed-history-query');
+    await shell.locator('#history-filter').fill('history-search-fixture');
+    await shell.locator('#history-list').getByText('Arco Fixture').first().waitFor();
+    await inspect('release-history');
+    await new Promise(resolve=>setTimeout(resolve,100));
+    assert.equal(await shell.locator('#history-filter').inputValue(),'history-search-fixture');
+    assert.equal(await shell.locator('#history-list').getByText('Arco Fixture').count()>0,true);
+    await shell.keyboard.press('Escape');
+    await press(page,'L',['meta']);await shell.locator('#command-input').fill('history-search-fixture');
+    await shell.locator('.suggestion').filter({hasText:'历史 ·'}).waitFor();await shell.keyboard.press('Escape');
   });
   await t.test('submitted login save, whitespace secret and wrong-origin refusal',async()=>{
     // 前面子测试可能留下了别的活动标签页；填充必须针对可见标签页。
     await invoke('select-tab',{id:(await inspect('state')).tabs.find(tab=>tab.url===origin+'/login-work').id});
     const page=await remote(origin+'/login-work');await page.locator('input[type=password]').fill('  test-only-password  ');await page.locator('button[type=submit]').click();
+    await waitState(s=>!!s.capture);
     await shell.locator('[data-action="capture-save"]').waitFor({state:'visible'}); await shell.locator('[data-action="capture-save"]').click();
     await waitState(s=>!s.capture); const credentials=await invoke('credentials');assert.equal(credentials.length,1);
     const wrong=await inspect('fixture-secret',{origin:'http://127.0.0.1:1/',username:'wrong',password:'wrong-secret'});
     await assert.rejects(()=>invoke('credential-fill',{id:wrong}),/来源不匹配/);
+    await invoke('navigate',{input:origin+'/login-work'}); const second=await remote(origin+'/login-work');
+    await second.locator('input[name=username]').fill('first-pending-user');await second.locator('input[type=password]').fill('first-pending-password');await second.locator('button[type=submit]').click({noWaitAfter:true});
+    await waitState(s=>!!s.capture);
+    await inspect('arm-save-gate');
+    const saving=invoke('capture-save');
+    await assertEventually(async()=>inspect('save-waiting'));
+    await invoke('new-tab',{url:origin+'/newer-login'});const newer=await remote(origin+'/newer-login');
+    await newer.locator('input[name=username]').fill('newer-user');await newer.locator('input[type=password]').fill('newer-password');await newer.locator('button[type=submit]').click({noWaitAfter:true});
+    await waitState(s=>s.capture?.origin===origin&&s.capture?.username==='newer-user');
+    await inspect('release-save');await saving;
+    await waitState(s=>s.capture?.username==='newer-user');
+    assert.equal(await shell.locator('#password-capture').isVisible(),true);
+    assert.match(await shell.locator('#password-capture').textContent(),/newer-user/);
+    await shell.locator('[data-action="capture-dismiss"]').click();await waitState(s=>!s.capture);
     await invoke('navigate',{input:origin+'/login-fill'}); const form=await remote(origin+'/login-fill');
     assert.equal((await invoke('credential-fill',{id:credentials[0].id})).count,1);
     assert.equal(await form.locator('input[type=password]').inputValue(),'  test-only-password  ');

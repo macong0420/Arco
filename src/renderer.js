@@ -2,7 +2,7 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const api = window.arco;
-let state = null, modal = '', selectedSuggestion = 0, lastItems = [], toastTimer, browserSources = [], authRequestID = '';
+let state = null, modal = '', selectedSuggestion = 0, lastItems = [], toastTimer, browserSources = [], authRequestID = '', history = [], historyGeneration = 0;
 const COLORS = { sky: '#d9e6f7', lavender: '#e5ddf3', rose: '#f2dce4', peach: '#f5e1d5', sand: '#eee6d4', sage: '#e0e6d9', mint: '#d8ebe2', white: '#efefef', graphite: '#555965' };
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const attr = esc;
@@ -68,8 +68,7 @@ function render() {
   $$('[data-extensions-entry]').forEach(node => { node.hidden = !hasExtensions; });
   $('#download-dot').classList.toggle('active', state.downloads.some(d => d.state === 'progressing'));
   if (state.warning) { toast(state.warning); state.warning = ''; }
-  if (state.capture && modal !== 'capture') showModal('capture');
-  if (!state.capture && modal === 'capture') closeModal();
+  renderCapture();
   if (state.httpAuth && (modal !== 'http-auth' || authRequestID !== state.httpAuth.id)) showModal('http-auth');
   if (!state.httpAuth && modal === 'http-auth') closeModal();
   if (modal === 'find') {
@@ -148,11 +147,16 @@ function renderDownloads(force = false) {
     if (record && progress) progress.textContent = downloadStatus(record);
   });
 }
+async function loadHistory(query = '') {
+  const generation = ++historyGeneration;
+  const entries = state.private ? [] : await call('history-search', { query, gate: state.testMode && query === 'delayed-history-query' }) || [];
+  if (generation === historyGeneration) history = entries;
+  return generation === historyGeneration ? entries : null;
+}
 function showModal(name, data = {}) {
   modal = name; lastItems = []; call('overlay', { visible: true, kind: name });
   const root = $('#overlay-root'); root.hidden = false; root.dataset.modal = name;
   if (name === 'palette') root.innerHTML = `<section class="panel command-panel" role="dialog" aria-label="命令面板"><div class="search-field">${icon('search')}<input id="command-input" autocomplete="off" placeholder="搜索或输入地址" aria-label="搜索或输入地址" value="${attr(data.value || '')}"><kbd>esc</kbd></div><div class="suggestions" id="suggestions"></div></section>`;
-  else if (name === 'capture') root.innerHTML = panel('保存此密码？', `<p class="description">只有你确认后，Arco 才会将密码写入本机加密保险库。</p><div class="credential-origin">${icon('key')} ${esc(state.capture.origin)}</div><p>${esc(state.capture.username || '未填写用户名')}</p><div class="actions">${button('不保存', 'capture-dismiss')}${button('保存密码', 'capture-save', 'button primary')}</div>`, { class: 'small capture-panel' });
   else if (name === 'favorite') root.innerHTML=panel('添加常驻网站',`<p class="description">显示在所有空间顶部，点一下即可打开。</p><form id="favorite-form"><label class="field-label" for="favorite-title">名称</label><input id="favorite-title" class="field" name="title" maxlength="500" placeholder="网站名称" value="${attr((data.title||(isBlank()?'':activeTab()?.title)||'').slice(0,500))}"><label class="field-label" for="favorite-url">网址</label><input id="favorite-url" class="field" name="url" type="url" required maxlength="8192" placeholder="https://example.com" value="${attr(data.url||activeTab()?.url||'')}"><div class="actions">${button('取消','close-modal')}${button('添加到常驻','submit-favorite','button primary')}</div></form>`,{class:'small'});
   else if (name === 'bookmark') root.innerHTML = panel('添加书签', `<form id="bookmark-form"><label class="field-label">名称</label><input class="field" name="title" required maxlength="500" value="${attr(data.title || activeTab()?.title || '')}"><label class="field-label">网址</label><input class="field" name="url" type="url" required maxlength="8192" value="${attr(data.url || activeTab()?.url || '')}"><label class="field-label">放入文件夹</label><select class="field" name="parentID"><option value="">空间顶层</option>${state.folders.map(f => `<option value="${attr(f.id)}">${esc(f.name)}</option>`).join('')}</select><div class="actions">${button('取消', 'close-modal')}${button('添加书签', 'submit-bookmark', 'button primary')}</div></form>`, { class: 'small' });
   else if (name === 'folder') root.innerHTML = panel(data.id ? '重命名文件夹' : '新建文件夹', `<form id="folder-form"><input type="hidden" name="id" value="${attr(data.id || '')}"><input type="hidden" name="parentID" value="${attr(data.parentID || '')}"><label class="field-label">名称</label><input class="field" name="name" required maxlength="100" autofocus value="${attr(data.name || '')}" placeholder="例如：阅读、工作"><div class="actions">${button('取消', 'close-modal')}${button('新建文件夹', 'submit-folder', 'button primary')}</div></form>`, { class: 'small' });
@@ -179,15 +183,25 @@ function showModal(name, data = {}) {
   else if (name === 'peek') root.innerHTML = panel('打开快速预览', `<form id="peek-form"><label class="field-label">网页地址</label><input class="field" name="url" type="url" required value="https://"><div class="actions">${button('取消', 'close-modal')}${button('预览', 'submit-peek', 'button primary')}</div></form>`, { class: 'small' });
   root.querySelectorAll('[data-close-modal]').forEach(el => el.addEventListener('click', closeModal));
   requestAnimationFrame(() => (root.querySelector('input:not([type="hidden"]),button') || root).focus());
-  if (name === 'palette') { renderSuggestions(data.value || ''); $('#command-input').select(); }
+  if (name === 'palette') { loadHistory().then(() => { if (modal === 'palette') renderSuggestions($('#command-input')?.value || ''); }); renderSuggestions(data.value || ''); $('#command-input').select(); }
   if (name === 'overview') renderOverview('');
+  if (name === 'history') loadHistory().then(() => { if (modal === 'history') $('#history-list').innerHTML = historyHTML($('#history-filter')?.value || ''); });
+}
+function renderCapture() {
+  const node = $('#password-capture');
+  node.hidden = !state.capture || !!state.httpAuth;
+  if (node.hidden) { node.innerHTML = ''; delete node.dataset.origin; delete node.dataset.username; return; }
+  const capture = state.capture;
+  if (node.dataset.origin === capture.origin && node.dataset.username === capture.username) return;
+  node.dataset.origin = capture.origin; node.dataset.username = capture.username;
+  node.innerHTML = `<h2>保存此密码？</h2><p class="description">只有你确认后，Arco 才会将密码写入本机加密保险库。</p><div class="credential-origin">${icon('key')} ${esc(capture.origin)}</div><p>${esc(capture.username || '未填写用户名')}</p><div class="actions">${button('不保存', 'capture-dismiss')}${button('保存密码', 'capture-save', 'button primary')}</div>`;
 }
 function closeModal(cancelAuth = true) { const closing = modal, authID = authRequestID; if (closing === 'onboarding') call('finish-onboarding'); if (closing === 'find') call('find-stop'); if (closing === 'http-auth' && cancelAuth && authID) call('http-auth-cancel', { id: authID }); modal = ''; authRequestID = ''; $('#overlay-root').hidden = true; $('#overlay-root').innerHTML = ''; call('overlay', { visible: false }); }
 function commandItems(query) {
   const q = query.toLowerCase().trim(), items = [];
   for (const tab of state.tabs) if (!q || `${tab.title} ${tab.url}`.toLowerCase().includes(q)) items.push({ title: tab.title, subtitle: '打开的标签页 · ' + hostname(tab.url), icon: 'tabs', tabID: tab.id });
   for (const bookmark of state.allBookmarks) if (!q || `${bookmark.title} ${bookmark.url}`.toLowerCase().includes(q)) items.push({ title: bookmark.title, subtitle: '书签 · ' + hostname(bookmark.url), icon: 'bookmark', url: bookmark.url });
-  for (const item of state.history) if (q && `${item.title} ${item.url}`.toLowerCase().includes(q)) items.push({ title: item.title, subtitle: '历史 · ' + hostname(item.url), icon: 'history', url: item.url });
+  for (const item of history) if (q && `${item.title} ${item.url}`.toLowerCase().includes(q)) items.push({ title: item.title, subtitle: '历史 · ' + hostname(item.url), icon: 'history', url: item.url });
   if (query.trim()) items.push({ title: query, subtitle: '转到地址或搜索', icon: 'search', input: query });
   else items.push({ title: '输入网址或搜索内容', subtitle: '按回车打开', icon: 'search', disabled: true });
   const seen = new Set(); return items.filter(x => { const key = x.tabID || x.url || x.input || x.title; if (seen.has(key)) return false; seen.add(key); return true; }).slice(0, 9);
@@ -205,7 +219,7 @@ async function chooseSuggestion(index) {
   else if (item.input) await call('navigate', { input: item.input });
 }
 function historyHTML(query = '') {
-  const list = state.history.filter(x => `${x.title} ${x.url}`.toLowerCase().includes(query.toLowerCase())).slice(0, 300);
+  const list = history.filter(x => `${x.title} ${x.url}`.toLowerCase().includes(query.toLowerCase())).slice(0, 300);
   return list.length ? list.map(x => `<div class="list-row">${icon('history')}<button class="grow" data-open-url="${attr(x.url)}" style="text-align:left"><strong>${esc(x.title)}</strong><small>${esc(x.url)} · ${new Date(x.visitedAt).toLocaleString('zh-CN')}</small></button><button class="icon" data-history-delete="${attr(x.id)}" title="删除">${icon('trash')}</button></div>`).join('') : '<div class="empty">没有匹配的浏览历史</div>';
 }
 function renderOverview(query) {
@@ -329,8 +343,8 @@ const actions = {
   'private-window': () => { closeModal(); call('private-window'); },
   print: () => call('print'), pdf: () => call('pdf'), screenshot: () => call('screenshot'), devtools: () => call('devtools'),
   'zoom-out': () => call('zoom', { delta: -0.1 }), 'zoom-in': () => call('zoom', { delta: 0.1 }), 'zoom-reset': () => call('zoom', { reset: true }),
-  'capture-save': async () => { if (await call('capture-save') !== null || !state.capture) { closeModal(); toast('密码已保存到加密保险库'); } }, 'capture-dismiss': () => { call('capture-dismiss'); closeModal(); },
-  'http-auth-submit': () => $('#http-auth-form').requestSubmit(), 'http-auth-cancel': closeModal,
+  'capture-save': async () => { if (await call('capture-save') !== null || !state.capture) toast('密码已保存到加密保险库'); }, 'capture-dismiss': () => call('capture-dismiss'),
+  'http-auth-submit': () => $('#http-auth-form').requestSubmit(), 'http-auth-cancel': () => closeModal(),
   'import-bookmarks': async () => { const result = await call('import-bookmarks'); if (result !== null) { showModal('settings', { section: 'bookmarks' }); toast('导入完成，重复网址已跳过'); } },
   'export-bookmarks': async () => { if (await call('export-bookmarks')) toast('书签已导出为 HTML'); },
   'connect-sync': async () => { await call('connect-sync'); showModal('settings', { section: 'sync' }); }, 'disconnect-sync': async () => { await call('disconnect-sync'); showModal('settings', { section: 'sync' }); },
@@ -354,7 +368,7 @@ const actions = {
   'password-sync-submit': () => $('#password-sync-form').requestSubmit(),
   'password-sync-lock': async () => { if(await call('password-sync-lock'))showModal('settings',{section:'sync'}); },
   'password-sync-now': async () => { if(await call('password-sync-now')){showModal('settings',{section:'sync'});toast('加密密码同步完成');} },
-  ...Object.fromEntries(['hour', 'day', 'all'].map(range => ['history-clear-' + range, async () => { if (await call('confirm-clear', { message: '清除这段时间的浏览历史和已关闭标签页记录？' })) { await call('history-clear', { range }); const list = $('#history-list'); if (list) list.innerHTML = historyHTML($('#history-filter')?.value || ''); } }])),
+  ...Object.fromEntries(['hour', 'day', 'all'].map(range => ['history-clear-' + range, async () => { if (await call('confirm-clear', { message: '清除这段时间的浏览历史和已关闭标签页记录？' })) { await call('history-clear', { range }); await loadHistory(); const list = $('#history-list'); if (list) list.innerHTML = historyHTML($('#history-filter')?.value || ''); } }])),
   'save-page': () => call('save-page'),
   'clear-site-data': async () => { if (await call('confirm-clear', { message: '清除当前网站的 Cookie 和网站数据？你会在该网站退出登录。' }) && await call('clear-site-data')) toast('已清除当前网站的数据'); },
   'default-browser': async () => { if (await call('default-browser')) toast('请在系统弹窗中确认把 Arco 设为默认浏览器'); },
@@ -383,7 +397,7 @@ document.addEventListener('click', async event => {
   if (a.newSubfolder) return showModal('folder', { parentID: a.newSubfolder });
   if (a.deleteFolder) return call('delete-folder', { id: a.deleteFolder });
   if (a.suggestion !== undefined) return chooseSuggestion(Number(a.suggestion));
-  if (a.historyDelete) { await call('history-delete', { id: a.historyDelete }); $('#history-list').innerHTML = historyHTML($('#history-filter')?.value || ''); return; }
+  if (a.historyDelete) { await call('history-delete', { id: a.historyDelete }); await loadHistory(); $('#history-list').innerHTML = historyHTML($('#history-filter')?.value || ''); return; }
   if (a.downloadOpen) return call('download-open', { id: a.downloadOpen });
   if (a.downloadReveal) return call('download-reveal', { id: a.downloadReveal });
   if (a.downloadCancel) return call('download-cancel', { id: a.downloadCancel });
@@ -458,7 +472,7 @@ document.addEventListener('click', async event => {
   if (a.copyGenerated !== undefined) return;
 });
 $('#space-heading').addEventListener('click', () => { if (!state.private) showModal('space', { id: state.activeSpaceID }); });
-$('#overlay-root').addEventListener('click', event => { if (event.target === $('#overlay-root') && modal !== 'capture') closeModal(); });
+$('#overlay-root').addEventListener('click', event => { if (event.target === $('#overlay-root')) closeModal(); });
 document.addEventListener('submit', async event => {
   event.preventDefault();
   // 表单里有 name="id" 的隐藏字段时，form.id 的命名属性会覆盖 id 属性返回该 input，必须读属性。
@@ -479,7 +493,7 @@ document.addEventListener('submit', async event => {
 });
 document.addEventListener('input', event => {
   if (event.target.id === 'command-input') { selectedSuggestion = 0; renderSuggestions(event.target.value); }
-  if (event.target.id === 'history-filter') $('#history-list').innerHTML = historyHTML(event.target.value);
+  if (event.target.id === 'history-filter') { const query = event.target.value; loadHistory(query).then(entries => { if (entries && modal === 'history') $('#history-list').innerHTML = historyHTML(query); }); }
   if (event.target.id === 'overview-filter') renderOverview(event.target.value);
   if (event.target.id === 'find-input') call('find', { query: event.target.value });
 });
@@ -489,7 +503,7 @@ document.addEventListener('change', event => {
   if (event.target.id === 'onboard-theme') call('update-settings', { theme: event.target.value });
 });
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape') { if (modal === 'capture') call('capture-dismiss'); if (state.peek) call('close-peek'); closeModal(); return; }
+  if (event.key === 'Escape') { if (state.peek) call('close-peek'); closeModal(); return; }
   if (modal === 'palette') {
     if (['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); selectedSuggestion = (selectedSuggestion + (event.key === 'ArrowDown' ? 1 : -1) + lastItems.length) % lastItems.length; renderSuggestions($('#command-input').value); }
     if (event.key === 'Enter') { event.preventDefault(); chooseSuggestion(selectedSuggestion); }
@@ -528,7 +542,7 @@ document.addEventListener('drop',async event=>{
   } else if(move.kind==='folder'&&targetFolder!==move.id)await call('update-folder',{id:move.id,parentID:targetFolder||null});
 });
 api.onState(value => { state = value; render(); });
-api.onCommand(command => { if (actions[command]) actions[command](); });
+api.onCommand(command => { if (command === 'auth-submitted') { if (!state.httpAuth) closeModal(false); } else if (actions[command]) actions[command](); });
 api.onEditBookmark(item => showModal('edit-bookmark', item));
 api.onEditFolder(item => showModal('folder', item));
 api.onPasskeyUnavailable(() => toast('Arco 没有可用的系统通行密钥，请改用密码登录'));

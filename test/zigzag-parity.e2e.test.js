@@ -70,11 +70,11 @@ test('external links, page menu, history ranges and per-site data', { timeout: 9
     assert.equal(await inspect(shell, 'evaluate', { id: warm, script: read }), '["v","c=1"]', 'other sites keep their data');
 
     // 按范围清历史：写盘后发布，无效范围拒绝，已关闭标签页不能把网址带回来。
-    await eventually(async () => (await state()).history.length >= 3, 'history recorded');
+    await eventually(async () => (await invoke(shell, 'history-search')).length >= 3, 'history recorded');
     await assert.rejects(invoke(shell, 'history-clear', { range: 'bogus' }));
     await invoke(shell, 'close-tab', { id: (await tabAt(a + '/linked')).id });
     await invoke(shell, 'history-clear', { range: 'hour' });
-    assert.deepEqual((await state()).history, []);
+    assert.deepEqual(await invoke(shell, 'history-search'), []);
     const files = fs.readdirSync(profile).filter(name => /history/i.test(name));
     assert(files.length, 'history file exists');
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(profile, files[0]), 'utf8')), []);
