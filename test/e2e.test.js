@@ -80,6 +80,7 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     if(req.url.startsWith('/shortcut-target'))return res.end('<title>Shortcut Target</title><h1>Shortcut target</h1>');
     if(req.url.startsWith('/shortcut'))return res.end('<title>Shortcut Fixture</title><a id="peek-link" href="/shortcut-target">Shortcut target</a>');
     if(req.url.startsWith('/peek-next'))return res.end('<title>Peek B</title><input id="peek-field" value=""><script>window.loadedAt=performance.now()</script>');
+    if(req.url.startsWith('/store-search'))return res.end('<title>Store Search</title><a id="store-result" href="https://chromewebstore.google.com/detail/extension-manager/efolofldmcajcobffimbnokcnfcicooc?hl=zh-CN">Extension Manager - Chrome Web Store</a>');
     if(req.url.startsWith('/reader-invalid'))return res.end('<!doctype html><title></title><body></body>');
     if(req.url.startsWith('/reader-valid'))return res.end('<title>Reader Fixture</title><article><h1>Reader Fixture</h1>'+Array.from({length:12},(_,i)=>`<p>Paragraph ${i} with enough readable article text for Readability extraction.</p>`).join('')+'<p><a id="reader-link" href="/reader-follow" onclick="window.readerScriptRan=true">Read more</a></p></article><script>window.pageScriptRan=true</script>');
     if(req.url.startsWith('/reader-follow'))return res.end('<title>Reader Follow</title><h1>Followed link</h1>');
@@ -147,7 +148,7 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     assert((await inspect('views')).filter(v=>v.visible).every(v=>v.bounds.y>=40));
     await inspect('capture',{name:'ui-sidebar-collapsed'});await restore.click();await waitState(s=>s.sidebarVisible);
     await shell.getByRole('button',{name:'常驻测试',exact:true}).click();assert.equal((await inspect('state')).tabs.length,1,'a shortcut should reuse the open tab');
-    await invoke('new-tab');const blank=(await inspect('state')).activeID;
+    await invoke('new-tab');await shell.locator('#command-input').waitFor({state:'visible'});await shell.keyboard.press('Escape');const blank=(await inspect('state')).activeID;
     await invoke('toggle-sidebar');await shell.getByRole('button',{name:'显示侧栏',exact:true}).waitFor({state:'visible'});await inspect('capture',{name:'ui-blank-collapsed'});
     await shell.getByRole('button',{name:'显示侧栏',exact:true}).click();await waitState(s=>s.sidebarVisible);
     await shell.getByRole('button',{name:'添加常驻网站',exact:true}).click();assert.equal(await shell.locator('#favorite-title').inputValue(),'');assert.equal(await shell.locator('#favorite-url').inputValue(),'');
@@ -162,6 +163,48 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     await assertEventually(async()=>(await inspect('views')).every(x=>!x.visible));
     await shell.keyboard.press('Escape');
     await assertEventually(async()=>(await inspect('views')).some(x=>x.visible));
+  });
+  await t.test('new tabs automatically focus a centered address palette from the sidebar, page shortcut and menu',async()=>{
+    const assertPalette=async()=>{
+      await shell.locator('#command-input').waitFor({state:'visible'});
+      await shell.waitForFunction(()=>document.activeElement===document.querySelector('#command-input'));
+      assert.equal(await shell.locator('#command-input').inputValue(),'');
+      const position=await shell.locator('.command-panel').evaluate(node=>{const r=node.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,width:innerWidth,height:innerHeight};});
+      assert(Math.abs(position.x-position.width/2)<1,'palette must be horizontally centered');
+      assert(Math.abs(position.y-position.height/2)<1,'palette must be vertically centered');
+    };
+    const count=(await inspect('state')).tabs.length;
+    await shell.locator('.new-tab-button').click(); await assertPalette();
+    const blankID=(await inspect('state')).activeID;
+    await shell.locator('#command-input').fill(origin+'/new-tab-enter');await shell.keyboard.press('Enter');
+    const page=await remote(origin+'/new-tab-enter');
+    assert.equal((await inspect('state')).activeID,blankID,'typing a URL reuses the newly created tab');
+    assert.equal((await inspect('state')).tabs.length,count+1);
+    await press(page,'t',['meta']);await assertPalette();await shell.keyboard.press('Escape');
+    await app.evaluate(({Menu})=>Menu.getApplicationMenu().items.find(item=>item.label==='文件').submenu.items.find(item=>item.label==='新建标签页').click());
+    await assertPalette();await shell.keyboard.press('Escape');
+    await invoke('select-tab',{id:blankID});
+  });
+  await t.test('store result links reach details and installation UI follows the committed page',async()=>{
+    const storeURL='https://chromewebstore.google.com/detail/extension-manager/efolofldmcajcobffimbnokcnfcicooc?hl=zh-CN';
+    let release,requested,served,requestSeen=false;const gate=new Promise(resolve=>{release=resolve;}),started=new Promise(resolve=>{requested=resolve;}),done=new Promise(resolve=>{served=resolve;});
+    const route=async request=>{requestSeen=true;requested();await gate;try{await request.fulfill({contentType:'text/html',body:'<title>Extension Manager Details</title><h1 id="store-details">Extension Manager</h1>'});}finally{served();}};
+    await app.context().route(storeURL,route);
+    try{
+      await invoke('new-tab',{url:origin+'/store-search'});const page=await remote(origin+'/store-search');
+      await page.click('#store-result',{noWaitAfter:true});await started;
+      assert.equal(await shell.locator('#store-install').isVisible(),false,'pending navigation must not offer installation on the old search page');
+      release();await page.locator('#store-details').waitFor();
+      assert.equal(page.url(),storeURL);
+      await shell.locator('#store-install').waitFor({state:'visible'});
+      await page.locator('#arco-store-install').waitFor();
+      await page.goBack();await page.locator('#store-result').waitFor();
+      await app.context().unroute(storeURL,route);
+      await app.context().route(storeURL,request=>request.abort('failed'));
+      await page.click('#store-result',{noWaitAfter:true});
+      await shell.locator('#toast').filter({hasText:'页面加载失败'}).waitFor();
+      assert.equal(await shell.locator('#store-install').isVisible(),false,'a failed store load must not offer installation');
+    }finally{release();if(requestSeen)await done;await app.context().unroute(storeURL);}
   });
   await t.test('reader view strips scripts and handlers, and its links open as ordinary tabs',async()=>{
     await invoke('new-tab',{url:origin+'/reader-valid'}); await remote(origin+'/reader-valid');
@@ -473,7 +516,7 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     await closePrivate(privateShell);
   });
   await t.test('blank and web tabs survive actual quit and relaunch',async()=>{
-    await invoke('new-tab'); await inspect('capture',{name:'new-tab'});await invoke('new-tab',{url:origin+'/second'});
+    await invoke('new-tab');await shell.locator('#command-input').waitFor({state:'visible'}); await inspect('capture',{name:'new-tab'});await shell.keyboard.press('Escape');await invoke('new-tab',{url:origin+'/second'});
     await invoke('new-tab',{url:origin+'/reopen-check'});
     await invoke('close-tab',{id:(await inspect('state')).tabs.find(t=>t.url===origin+'/reopen-check').id});
     await close(); await launch(); const state=await inspect('state');
