@@ -22,9 +22,11 @@ document.addEventListener('submit', event => { if (event.isTrusted) capture(even
 document.addEventListener('click', event => {
   if (!event.isTrusted) return;
   const link = event.target.closest?.('a[href]');
+  // 站内跳转（导航、搜索页翻页）留在当前标签页；只有站外链接才交给「优先小窗」设置。
+  const site = host => host.replace(/^www\./, '');
   if (link && event.button === 0 && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && !event.defaultPrevented && (!link.target || link.target === '_self') && !link.hasAttribute('download') && /^https?:/.test(link.href)) {
-    const target = new URL(link.href), sameDocument = target.hash && target.origin === location.origin && target.pathname === location.pathname && target.search === location.search;
-    if (!sameDocument) ipcRenderer.send('arco:page-link', { url: target.href });
+    const target = new URL(link.href);
+    if (site(target.hostname) !== site(location.hostname)) ipcRenderer.send('arco:page-link', { url: target.href });
   }
   if (event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && link && /^https?:/.test(link.href)) { event.preventDefault(); event.stopImmediatePropagation(); ipcRenderer.send('arco:page-peek', { url: link.href }); return; }
   const button = event.target.closest?.('button[type="submit"],input[type="submit"]');

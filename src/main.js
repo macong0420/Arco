@@ -434,7 +434,7 @@ function attachTab(tab, initialExtensionID = '') {
     const current = wc.getURL(); tab.url = current; sendState(win);
     const id = storeID(current);
     if (!id || url !== STORE_INSTALL + id) return;
-    installFromStore(win, id).catch(cause => console.error('安装扩展失败:', cause.message));
+    installFromStore(win, id).catch(cause => reportInstall(win, 'error', cause.message));
   });
   wc.on('did-start-navigation', (event, url, isInPlace, isMainFrame) => {
     if (!isMainFrame || isInPlace) return;
@@ -588,16 +588,22 @@ function offerStoreInstall(tab) {
   if (!id || !tab.view || tab.view.webContents.isDestroyed()) return;
   tab.view.webContents.executeJavaScript(storeBannerScript(id), true).catch(() => {});
 }
+// 安装过程中界面只看到一句进度：下载校验与加载都很快，细分阶段反而闪得看不清。
+function reportInstall(win, state, message) {
+  if (win.isDestroyed() || win.shell.webContents.isDestroyed()) return;
+  win.shell.webContents.send('arco:command', { command: 'store-install-status', state, message });
+}
 async function installFromStore(win, input) {
   if (win.private) error('无痕窗口不能安装扩展');
+  reportInstall(win, 'progress', '正在下载并校验扩展…');
   const result = await library.installFromStore(input, testMode ? async () => testStoreApproval : async asked => {
     const detail = [`权限：${asked.permissions.join('、') || '无'}`, asked.optional.length ? `可选权限：${asked.optional.join('、')}` : '', '扩展签名、扩展 ID 与包内容已在本机校验。'].filter(Boolean).join('\n');
     const answer = await dialog.showMessageBox(win, { type: 'question', buttons: ['取消', '安装'], defaultId: 0, cancelId: 0, message: `安装 ${asked.name} ${asked.version}？`, detail: detail.slice(0, 2000) });
     return answer.response === 1;
   });
-  if (result.cancelled) return { cancelled: true, list: await library.extensionList() };
+  if (result.cancelled) { reportInstall(win, 'info', '已取消安装'); return { cancelled: true, list: await library.extensionList() }; }
   broadcast();
-  if (!win.shell.webContents.isDestroyed()) win.shell.webContents.send('arco:command', 'store-installed');
+  if (!win.shell.webContents.isDestroyed()) win.shell.webContents.send('arco:command', { command: 'store-installed', message: result.already ? '这个扩展已经装好了' : `已安装 ${result.name || '扩展'}` });
   return result;
 }
 function safeCaptureOrigin(value) { try { const url = new URL(core.webURL(value)); if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return null; return url.origin; } catch { return null; } }
@@ -1151,7 +1157,7 @@ ipcMain.handle('arco:invoke', async (event, message) => {
       case 'extension-list': if (win.private) error('无痕窗口不能管理扩展'); return await library.extensionList();
       case 'extension-toggle': if (win.private) error('无痕窗口不能管理扩展'); return await library.setExtensionEnabled(bounded(a.id, 200), !!a.enabled);
       case 'extension-popup': return await openExtensionPopup(win, bounded(a.id, 200), a.anchor || {});
-      case 'install-extension-store': { const result = await installFromStore(win, bounded(a.input, 500)); return { ...result, list: await library.extensionList() }; }
+      case 'install-extension-store': { try { const result = await installFromStore(win, bounded(a.input, 500)); return { ...result, list: await library.extensionList() }; } catch (cause) { reportInstall(win, 'error', cause.message); throw cause; } }
       case 'remove-extension': if (win.private) error('无痕窗口不能管理扩展'); await library.removeExtension(bounded(a.id, 128)); break;
       case 'copy': clipboard.writeText(bounded(a.text, 1000000)); break;
       case 'menu': showAppMenu(win); break;
@@ -1301,7 +1307,7 @@ function commandItem(win, name) {
 function showAppMenu(win) {
   const active = win.tabs.get(win.activeID), store = win.private ? '' : storeID(active?.url);
   Menu.buildFromTemplate([
-    ...(store ? [{ label: '安装此扩展', click: () => installFromStore(win, store).catch(cause => console.error('安装扩展失败:', cause.message)) }, { type: 'separator' }] : []),
+    ...(store ? [{ label: '安装此扩展', click: () => installFromStore(win, store).catch(cause => reportInstall(win, 'error', cause.message)) }, { type: 'separator' }] : []),
     commandItem(win, 'newTab'), commandItem(win, 'closeTab'), commandItem(win, 'reopenTab'), commandItem(win, 'palette'),
     commandItem(win, 'find'), commandItem(win, 'findNext'), commandItem(win, 'findPrevious'),
     { label: '全部标签页', click: () => win.shell.webContents.send('arco:command', 'overview') },

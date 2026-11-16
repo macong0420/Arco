@@ -152,8 +152,14 @@ test('reinstalling a disabled store extension keeps the old package on cancel, b
     const shell = launched.shell;
     const installedPath = path.join(profile, 'Extensions', storeID);
     const hashOf = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    // 安装过程必须给出进度与结果提示，失败也必须落成可读提示而不是只写控制台。
+    await shell.evaluate(() => { window.__arcoInstallLog = []; window.arco.onCommand(command => { if (command && typeof command === 'object') window.__arcoInstallLog.push(command.command + ':' + (command.state || '')); }); });
+    const installLog = () => shell.evaluate(() => window.__arcoInstallLog);
     const first = await invoke(shell, 'install-extension-store', { input: storeID });
     assert.equal(first.version, '1.0.0');
+    let installMessages = await installLog();
+    assert.ok(installMessages.includes('store-install-status:progress'), 'installation must report progress');
+    assert.ok(installMessages.includes('store-installed:'), 'installation must report success');
     assert.equal(first.enabled, true);
     assert.equal(first.id, storeID, 'a signed package without manifest.key must load under the requested id');
     assert.equal(JSON.parse(fs.readFileSync(path.join(installedPath, 'manifest.json'), 'utf8')).key, keys.publicKey.toString('base64'), 'the authenticated developer key must be written');
@@ -171,6 +177,8 @@ test('reinstalling a disabled store extension keeps the old package on cancel, b
     const bad = Buffer.from(payload); bad[bad.length - 1] ^= 0xff;
     payload = bad;
     await assert.rejects(() => invoke(shell, 'install-extension-store', { input: storeID }), /签名校验失败/);
+    installMessages = await installLog();
+    assert.ok(installMessages.includes('store-install-status:error'), 'a failed installation must report an error');
     assert.equal(hashOf(path.join(installedPath, 'cs.js')), v1Hash);
     state = await inspect(shell, 'state');
     assert.equal(state.settings.extensions.length, 1);

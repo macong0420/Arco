@@ -19,7 +19,7 @@ test('toolbar system integration: translate, Little Arc and developer tools', { 
   const server = http.createServer((request, response) => {
     requests.push(request.url);
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
-    if (request.url === '/link') return response.end('<title>Link</title><a id="next" href="/next">next</a>');
+    if (request.url === '/link') return response.end(`<title>Link</title><a id="next" href="/next">next</a><a id="away" href="http://127.0.0.1:${server.address().port}/next">away</a>`);
     if (request.url === '/next') return response.end('<title>Next</title><h1>Next page</h1>');
     response.end('<title>Integration</title><h1>Hello world</h1><p id="body">Translate this visible sentence.</p>');
   });
@@ -111,35 +111,41 @@ test('toolbar system integration: translate, Little Arc and developer tools', { 
       await invoke('update-settings', { devtoolsMode: 'detach' });
     });
 
-    await t.test('settings let ordinary links open in Little Arc and embed back as a new tab', async () => {
-      await invoke('new-tab', { url: origin + '/link' });
-      await eventually(async () => (await app.windows()).some(candidate => candidate.url() === origin + '/link'), 'source link page');
+    await t.test('only cross-site links open in Little Arc, same-site links stay in the tab', async () => {
+      const port = server.address().port;
+      const click = async (url, selector) => {
+        const page = (await app.windows()).find(candidate => candidate.url() === url);
+        assert(page, 'page for ' + url);
+        const rect = await page.locator(selector).boundingBox();
+        const cdp = await app.context().newCDPSession(page);
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: rect.x + 10, y: rect.y + 10, button: 'left', clickCount: 1 });
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: rect.x + 10, y: rect.y + 10, button: 'left', clickCount: 1 });
+        await cdp.detach();
+      };
+      const littleWindows = async () => (await app.windows()).filter(candidate => candidate !== shell && /shell\.html$/.test(candidate.url()));
+
+      await invoke('new-tab', { url: `http://localhost:${port}/link` });
+      await eventually(async () => (await app.windows()).some(candidate => candidate.url() === `http://localhost:${port}/link`), 'source link page');
       await invoke('update-settings', { linkOpenMode: 'little' });
       const before = (await inspect('state')).tabs.length;
-      const activeLink = await activePage();
-      const sourcePage = (await app.windows()).find(candidate => candidate.url() === origin + '/link' || candidate.url() === activeLink.url);
-      assert(sourcePage, 'source link target must exist');
-      await sourcePage.bringToFront();
-      const rect = await sourcePage.locator('#next').boundingBox();
-      const cdp = await app.context().newCDPSession(sourcePage);
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: rect.x + 10, y: rect.y + 10, button: 'left', clickCount: 1 });
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: rect.x + 10, y: rect.y + 10, button: 'left', clickCount: 1 });
-      await cdp.detach();
+
+      await click(`http://localhost:${port}/link`, '#next');
+      await eventually(async () => (await app.windows()).some(candidate => candidate.url() === `http://localhost:${port}/next`), 'same-site link navigates in the tab');
+      assert.equal((await littleWindows()).length, 0, 'same-site links must not open a Little Arc window');
+      assert.equal((await inspect('state')).tabs.length, before, 'same-site links must not add a tab');
+
+      await invoke('new-tab', { url: `http://localhost:${port}/link` });
+      await eventually(async () => (await app.windows()).some(candidate => candidate.url() === `http://localhost:${port}/link`), 'source link page again');
+      await click(`http://localhost:${port}/link`, '#away');
       let child = null;
-      await eventually(async () => { child = (await app.windows()).find(candidate => candidate !== shell && /shell\.html$/.test(candidate.url())); return !!child; }, 'Little Arc from link click');
+      await eventually(async () => { child = (await littleWindows())[0]; return !!child; }, 'Little Arc from cross-site link click');
       await child.waitForFunction(() => !!window.arco);
-      const childState = await child.evaluate(() => window.arco.invoke('arco:test', { action: 'state' }));
-      assert.equal(childState.little, true);
-      assert(childState.tabs.some(tab => tab.url === origin + '/next'));
-      assert.equal((await inspect('state')).tabs.length, before);
-      await child.locator('[data-action="little-promote"]').click();
-      await eventually(async () => !(await app.windows()).some(candidate => candidate !== shell && /shell\.html$/.test(candidate.url())), 'Little Arc embedded');
-      const state = await inspect('state');
-      assert.equal(state.tabs.length, before + 1);
-      assert(state.tabs.some(tab => tab.url === origin + '/next'));
+      assert.equal((await child.evaluate(() => window.arco.invoke('arco:test', { action: 'state' }))).little, true);
+      assert((await app.windows()).some(candidate => candidate.url() === origin + '/next'), 'cross-site link loads in the Little Arc window');
       const persisted = JSON.parse(fs.readFileSync(path.join(profile, 'Library.json'), 'utf8')).settings;
       assert.equal(persisted.linkOpenMode, 'little');
       await invoke('update-settings', { linkOpenMode: 'tab' });
+      await child.close();
     });
 
     assert(requests.includes('/'), 'the fixture must have been loaded');
