@@ -16,10 +16,14 @@ test('URL normalization uses HTTPS for domains and HTTP for localhost', () => {
 test('shortcut settings preserve defaults and reject duplicates or bare keys', () => {
   const data = core.initialLibrary();
   assert.equal(data.settings.shortcuts.sidebar, 'CmdOrCtrl+S');
+  assert.equal(data.settings.shortcuts.newWindow, 'CmdOrCtrl+N');
   assert.equal(core.validateShortcuts({ ...data.settings.shortcuts, devtools: 'CmdOrCtrl+Alt+U' }).devtools, 'CmdOrCtrl+Alt+U');
   assert.throws(() => core.validateShortcuts({ ...data.settings.shortcuts, devtools: 'U' }), /格式/);
   assert.throws(() => core.validateShortcuts({ ...data.settings.shortcuts, devtools: 'CmdOrCtrl+S' }), /重复/);
   assert.equal(core.validateLibrary(data).settings.shortcuts.devtools, 'CmdOrCtrl+Alt+I');
+  // 旧版本保存的快捷键没有 newWindow：合并默认值后必须补齐，否则校验会因数量不符失败。
+  const legacy = core.initialLibrary(); delete legacy.settings.shortcuts.newWindow;
+  assert.equal(core.validateLibrary(legacy).settings.shortcuts.newWindow, 'CmdOrCtrl+N');
 });
 test('exact origins include scheme and effective port', () => {
   const origin = core.exactOrigin('https://example.com/login');

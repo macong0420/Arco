@@ -190,6 +190,14 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     await press(page,'t',['meta']);await assertPalette();await shell.keyboard.press('Escape');
     await app.evaluate(({Menu})=>Menu.getApplicationMenu().items.find(item=>item.label==='文件').submenu.items.find(item=>item.label==='新建标签页').click());
     await assertPalette();await shell.keyboard.press('Escape');
+    // Cmd+N 新建窗口：页面焦点下走 before-input-event，壳层焦点下走同一张命令表。
+    const before=(await inspect('windows')).map(w=>w.id);
+    await press(page,'n',['meta']);
+    await assertEventually(async()=>(await inspect('windows')).length===before.length+1);
+    const extra=(await inspect('windows')).find(w=>!before.includes(w.id));
+    assert.equal(extra.private,false);
+    await app.evaluate(({BaseWindow},id)=>BaseWindow.getAllWindows().find(w=>w.id===id).close(),extra.id);
+    await assertEventually(async()=>(await inspect('windows')).length===before.length);
     await invoke('select-tab',{id:blankID});
   });
   await t.test('store result links reach details and installation UI follows the committed page',async()=>{

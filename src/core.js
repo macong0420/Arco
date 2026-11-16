@@ -49,7 +49,7 @@ function secret(value, max = 4096) {
   return value;
 }
 function stamp(value) { return { ...value, updatedAt: value.updatedAt || now() }; }
-const DEFAULT_SHORTCUTS = Object.freeze({ newTab: 'CmdOrCtrl+T', closeTab: 'CmdOrCtrl+W', reopenTab: 'CmdOrCtrl+Shift+T', palette: 'CmdOrCtrl+L', find: 'CmdOrCtrl+F', findNext: 'CmdOrCtrl+G', findPrevious: 'CmdOrCtrl+Shift+G', print: 'CmdOrCtrl+P', privateWindow: 'CmdOrCtrl+Shift+N', closeWindow: 'CmdOrCtrl+Shift+W', reload: 'CmdOrCtrl+R', overview: 'CmdOrCtrl+Shift+\\', history: 'CmdOrCtrl+Y', settings: 'CmdOrCtrl+,', sidebar: 'CmdOrCtrl+S', devtools: 'CmdOrCtrl+Alt+I' });
+const DEFAULT_SHORTCUTS = Object.freeze({ newTab: 'CmdOrCtrl+T', newWindow: 'CmdOrCtrl+N', closeTab: 'CmdOrCtrl+W', reopenTab: 'CmdOrCtrl+Shift+T', palette: 'CmdOrCtrl+L', find: 'CmdOrCtrl+F', findNext: 'CmdOrCtrl+G', findPrevious: 'CmdOrCtrl+Shift+G', print: 'CmdOrCtrl+P', privateWindow: 'CmdOrCtrl+Shift+N', closeWindow: 'CmdOrCtrl+Shift+W', reload: 'CmdOrCtrl+R', overview: 'CmdOrCtrl+Shift+\\', history: 'CmdOrCtrl+Y', settings: 'CmdOrCtrl+,', sidebar: 'CmdOrCtrl+S', devtools: 'CmdOrCtrl+Alt+I' });
 const SHORTCUT_MODIFIERS = new Set(['cmdorctrl', 'commandorcontrol', 'cmd', 'command', 'ctrl', 'control', 'alt', 'option', 'shift', 'super', 'meta']);
 const SHORTCUT_KEYS = /^(?:[a-z0-9]|f(?:[1-9]|1[0-9]|2[0-4])|tab|space|enter|return|esc|escape|backspace|delete|up|down|left|right|home|end|pageup|pagedown)$/i;
 function validateShortcuts(value) {
