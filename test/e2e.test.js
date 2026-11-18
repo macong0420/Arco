@@ -212,7 +212,7 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
       release();await page.locator('#store-details').waitFor();
       assert.equal(page.url(),storeURL);
       await shell.locator('#store-install').waitFor({state:'visible'});
-      await page.locator('#arco-store-install').waitFor();
+      await page.waitForFunction(()=>typeof window.__arcoStoreInstall==='function');
       await page.goBack();await page.locator('#store-result').waitFor();
       await app.context().unroute(storeURL,route);
       await app.context().route(storeURL,request=>request.abort('failed'));
@@ -802,6 +802,7 @@ test('a Chrome Web Store package installs through the settings UI',{timeout:6000
     page.setDefaultTimeout(8000);await page.waitForFunction(()=>!!window.arco&&!!document.querySelector('#favorites .favorite-add'));
     if(await page.$('[data-onboarding]')){await page.click('[data-action="onboard-skip"]');await page.waitForFunction(()=>!document.querySelector('[data-onboarding]'));}
     await page.click('[data-action="settings"]');await page.click('[data-settings-section="extensions"]');
+    await page.locator('[data-action="install-local-crx"]').waitFor();
     await page.fill('#store-input',`https://chromewebstore.google.com/detail/fixture/${storeID}?hl=zh-CN`);
     await page.click('[data-action="install-store-input"]');
     await page.waitForFunction(()=>/Arco Store Fixture/.test(document.querySelector('#extension-list')?.textContent||''));
@@ -943,4 +944,29 @@ test('failed protected reopen in the same process keeps Session bytes on shutdow
       fs.rmSync(folder,{recursive:true,force:true});
     }
   }
+});
+test('a failed page load shows an error page instead of a blank window',{timeout:60000},async()=>{
+  const folder=fs.mkdtempSync(path.join(os.tmpdir(),'arco-loadfail-'));
+  const site=http.createServer((_req,res)=>{res.setHeader('Content-Type','text/html');res.end('<!doctype html><title>Recovered</title><h1>ok</h1>');});
+  await new Promise(resolve=>site.listen(0,'127.0.0.1',resolve));
+  const origin=`http://127.0.0.1:${site.address().port}/`;
+  let instance=null;
+  try{
+    instance=await electron.launch({args:[root],env:{...process.env,ARCO_TEST_MODE:'1',ARCO_USER_DATA_DIR:folder},timeout:15000});
+    let page=null;
+    for(let i=0;i<200&&!page;i++){page=(await instance.windows()).find(candidate=>/shell\.html$/.test(candidate.url()));if(!page)await new Promise(resolve=>setTimeout(resolve,50));}
+    page.setDefaultTimeout(8000);await page.waitForFunction(()=>!!window.arco&&!!document.querySelector('#space-name')?.textContent);
+    const state=()=>page.evaluate(()=>window.arco.invoke('arco:test',{action:'state'}));
+    // 无法解析的主机名：主框架导航以 ERR_NAME_NOT_RESOLVED 结束，Chromium 不会自己画错误页。
+    await invoke('navigate',{input:'http://arco-load-failure.invalid/'},page).catch(()=>null);
+    await assertEventually(async()=>(await state()).tabs.some(tab=>tab.failed));
+    await page.waitForSelector('#page-error:not([hidden])');
+    assert.match(await page.textContent('#page-error-url'),/arco-load-failure\.invalid/);
+    assert.match(await page.textContent('#page-error-hint'),/ERR_[A-Z_]+/);
+    // 地址栏保留目标网址，而不是退回 about:blank。
+    assert.match(await page.textContent('#domain'),/arco-load-failure\.invalid/);
+    await invoke('navigate',{input:origin},page);
+    await assertEventually(async()=>!(await state()).tabs.some(tab=>tab.failed));
+    assert.equal(await page.isHidden('#page-error'),true);
+  }finally{site.close();if(instance)await instance.close().catch(()=>{});}
 });

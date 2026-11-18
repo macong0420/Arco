@@ -181,7 +181,8 @@ class Library {
   importSpaces(items) { return this.commit(data => this.appendSpaces(data, items)); }
   async choose(type) {
     const properties = type === 'directory' ? ['openDirectory', 'createDirectory'] : ['openFile'];
-    const result = await dialog.showOpenDialog({ properties, filters: type === 'file' ? [{ name: '书签或密码', extensions: ['json', 'html', 'csv'] }] : undefined });
+    const filters = type === 'file' ? [{ name: '书签或密码', extensions: ['json', 'html', 'csv'] }] : type === 'crx' ? [{ name: 'Chrome 扩展', extensions: ['crx'] }] : undefined;
+    const result = await dialog.showOpenDialog({ properties, filters });
     return result.canceled ? null : result.filePaths[0];
   }
   async importFile(file, spaceID) {
@@ -324,13 +325,15 @@ class Library {
       try { if (fs.existsSync(path.join(extension.path, 'manifest.json'))) await session.fromPartition('persist:arco').extensions.loadExtension(extension.path, { allowFileAccess: false }); } catch (error) { this.settings.syncStatus = `扩展 ${path.basename(extension.path)} 加载失败：${error.message}`; }
     }
   }
-  async addExtension() {
+  async addExtension(approve = async () => true, selectedFolder = '') {
     if (this.installingExtensions) throw new Error('扩展正在安装，请稍候');
     this.installingExtensions = true;
     try {
-      const folder = await this.choose('directory'); if (!folder) return null;
+      const folder = selectedFolder || await this.choose('directory'); if (!folder) return null;
       const manifest = JSON.parse(fs.readFileSync(path.join(folder, 'manifest.json'), 'utf8'));
       if (!manifest.manifest_version || !manifest.name) throw new Error('不是有效的解压扩展');
+      const asked = { name: manifest.name, version: manifest.version || '', permissions: [...(manifest.permissions || []), ...(manifest.host_permissions || [])], optional: [...(manifest.optional_permissions || []), ...(manifest.optional_host_permissions || [])] };
+      if (!(await approve(asked))) return null;
       const ses = session.fromPartition('persist:arco'), previouslyLoaded = new Set(ses.extensions.getAllExtensions().map(extension => extension.id));
       const extension = await ses.extensions.loadExtension(folder, { allowFileAccess: false });
       try { this.updateSettings(settings => { settings.extensions = [...(settings.extensions || []).filter(x => x.id !== extension.id), { id: extension.id, path: folder }]; }); }
@@ -346,57 +349,74 @@ class Library {
       this.updateSettings(settings => { settings.extensions = (settings.extensions || []).filter(x => x.id !== extensionID); });
       try { session.fromPartition('persist:arco').extensions.removeExtension(extensionID); }
       catch { this.warning = '扩展记录已移除，但当前运行实例卸载失败；已保留文件，重启后不会加载'; this.notify(); return; }
-      if (record?.storeID && crx.ID.test(record.storeID) && record.path === path.join(path.dirname(this.file), 'Extensions', record.storeID)) {
+      const packageID = record?.storeID && crx.ID.test(record.storeID) ? record.storeID : extensionID;
+      if (record && crx.ID.test(packageID) && record.path === path.join(path.dirname(this.file), 'Extensions', packageID)) {
         try { fs.rmSync(record.path, { recursive: true, force: true }); }
         catch { this.warning = '扩展记录已移除，但扩展文件清理失败；已保留目录供后续处理'; this.notify(); }
       }
     } finally { this.installingExtensions = false; }
+  }
+  async installPackage(expectedID, prepare, approve) {
+    const ses = session.fromPartition('persist:arco'), extensionRoot = path.join(path.dirname(this.file), 'Extensions');
+    fs.mkdirSync(extensionRoot, { recursive: true, mode: 0o700 });
+    const staging = path.join(extensionRoot, `.${expectedID || 'local'}.install-${process.pid}-${core.id()}`);
+    let storeID = expectedID, directory = '', backup = '', replaced = false, extension = null, result = null;
+    try {
+      const manifest = await prepare(staging);
+      storeID ||= manifest.id;
+      if (!crx.ID.test(storeID) || (manifest.id && manifest.id !== storeID)) throw new Error('扩展签名中的 ID 无效');
+      directory = path.join(extensionRoot, storeID);
+      const known = (this.settings.extensions || []).find(item => item.storeID === storeID && item.path === directory)
+        || (this.settings.extensions || []).find(item => item.id === storeID && item.path === directory);
+      if ((this.settings.extensions || []).some(item => (item.id === storeID || item.storeID === storeID) && item !== known)) throw new Error('同一扩展 ID 已从其他本地目录安装，请先移除后重试');
+      const enabled = known ? known.enabled !== false : true;
+      const full = JSON.parse(fs.readFileSync(path.join(staging, 'manifest.json'), 'utf8'));
+      const asked = { name: manifest.name, version: manifest.version, permissions: [...(full.permissions || []), ...(full.host_permissions || [])], optional: [...(full.optional_permissions || []), ...(full.optional_host_permissions || [])] };
+      if (!(await approve(asked))) { fs.rmSync(staging, { recursive: true, force: true }); return { cancelled: true }; }
+      if (known) ses.extensions.removeExtension(known.id);
+      if (fs.existsSync(directory)) { backup = path.join(extensionRoot, `.${storeID}.backup-${process.pid}-${core.id()}`); fs.renameSync(directory, backup); }
+      fs.renameSync(staging, directory); replaced = true;
+      extension = await ses.extensions.loadExtension(directory, { allowFileAccess: false });
+      if (extension.id !== storeID) throw new Error(`扩展加载后的 ID 与包签名 ID 不一致（${extension.id}），已拒绝安装`);
+      if (!enabled) ses.extensions.removeExtension(extension.id);
+      this.updateSettings(settings => { settings.extensions = [...(settings.extensions || []).filter(x => x.id !== known?.id && x.id !== extension.id && x.storeID !== storeID), { id: extension.id, path: directory, storeID, enabled }]; });
+      result = { id: extension.id, name: extension.name || manifest.name, version: manifest.version, already: false, reinstalled: !!known, enabled };
+    } catch (cause) {
+      if (extension && ses.extensions.getExtension(extension.id)) ses.extensions.removeExtension(extension.id);
+      if (replaced) {
+        fs.rmSync(directory, { recursive: true, force: true });
+        if (backup && fs.existsSync(backup)) fs.renameSync(backup, directory);
+        const known = (this.settings.extensions || []).find(item => item.path === directory);
+        if (known && known.enabled !== false && fs.existsSync(path.join(directory, 'manifest.json'))) await ses.extensions.loadExtension(directory, { allowFileAccess: false }).catch(() => {});
+      } else {
+        if (backup && fs.existsSync(backup) && !fs.existsSync(directory)) fs.renameSync(backup, directory);
+        fs.rmSync(staging, { recursive: true, force: true });
+      }
+      throw cause;
+    }
+    if (backup) {
+      try { fs.rmSync(backup, { recursive: true, force: true }); }
+      catch { this.warning = '旧扩展备份清理失败，已保留备份目录；新版本已生效'; }
+    }
+    return result;
   }
   async installFromStore(input, approve = async () => true) {
     if (this.installingExtensions) throw new Error('扩展正在安装，请稍候');
     this.installingExtensions = true;
     try {
       const storeID = crx.extensionID(input), ses = session.fromPartition('persist:arco');
-      const known = (this.settings.extensions || []).find(x => x.storeID === storeID);
+      const known = (this.settings.extensions || []).find(item => item.storeID === storeID);
       if (known && ses.extensions.getExtension(known.id)) return { id: known.id, name: '', already: true };
-      const extensionRoot = path.join(path.dirname(this.file), 'Extensions'), directory = path.join(extensionRoot, storeID);
-      fs.mkdirSync(extensionRoot, { recursive: true, mode: 0o700 });
-      const staging = path.join(extensionRoot, `.${storeID}.install-${process.pid}-${core.id()}`);
-      const enabled = known ? known.enabled !== false : true;
-      let manifest, backup = '', replaced = false, extension = null, result = null;
-      try {
-        manifest = await crx.install(storeID, staging);
-        // crx 已在校验签名/ID 后解包；安装前仍必须让使用者看到它要什么权限。
-        const full = JSON.parse(fs.readFileSync(path.join(staging, 'manifest.json'), 'utf8'));
-        const asked = { name: manifest.name, version: manifest.version, permissions: [...(full.permissions || []), ...(full.host_permissions || [])], optional: [...(full.optional_permissions || []), ...(full.optional_host_permissions || [])] };
-        if (!(await approve(asked))) { fs.rmSync(staging, { recursive: true, force: true }); return { cancelled: true }; }
-        if (known) ses.extensions.removeExtension(known.id);
-        if (fs.existsSync(directory)) { backup = path.join(extensionRoot, `.${storeID}.backup-${process.pid}-${core.id()}`); fs.renameSync(directory, backup); }
-        fs.renameSync(staging, directory); replaced = true;
-        extension = await ses.extensions.loadExtension(directory, { allowFileAccess: false });
-        // 商店 ID 来自已校验的签名公钥；实际加载身份不一致时不能把它当作这个扩展发布。
-        if (extension.id !== storeID) throw new Error(`扩展加载后的 ID 与商店 ID 不一致（${extension.id}），已拒绝安装`);
-        if (!enabled) ses.extensions.removeExtension(extension.id);
-        this.updateSettings(settings => { settings.extensions = [...(settings.extensions || []).filter(x => x.id !== known?.id && x.id !== extension.id && x.storeID !== storeID), { id: extension.id, path: directory, storeID, enabled }]; });
-        result = { id: extension.id, name: extension.name || manifest.name, version: manifest.version, already: false, reinstalled: !!known, enabled };
-      } catch (cause) {
-        if (extension && ses.extensions.getExtension(extension.id)) ses.extensions.removeExtension(extension.id);
-        if (replaced) {
-          fs.rmSync(directory, { recursive: true, force: true });
-          if (backup && fs.existsSync(backup)) fs.renameSync(backup, directory);
-          if (known && known.enabled !== false && fs.existsSync(path.join(directory, 'manifest.json'))) await ses.extensions.loadExtension(directory, { allowFileAccess: false }).catch(() => {});
-        } else {
-          if (backup && fs.existsSync(backup) && !fs.existsSync(directory)) fs.renameSync(backup, directory);
-          fs.rmSync(staging, { recursive: true, force: true });
-        }
-        throw cause;
-      }
-      // 提交后的备份删除只是清理：清理失败不能回滚到可能已部分删除的旧备份，也不能删除有效新包。
-      if (backup) {
-        try { fs.rmSync(backup, { recursive: true, force: true }); }
-        catch { this.warning = '旧扩展备份清理失败，已保留备份目录；新版本已生效'; }
-      }
-      return result;
+      return await this.installPackage(storeID, async staging => ({ ...await crx.install(storeID, staging), id: storeID }), approve);
+    } finally { this.installingExtensions = false; }
+  }
+  async installLocalCRX(approve = async () => true) {
+    if (this.installingExtensions) throw new Error('扩展正在安装，请稍候');
+    this.installingExtensions = true;
+    try {
+      const file = await this.choose('crx');
+      if (!file) return null;
+      return await this.installPackage('', staging => crx.installFile(file, staging), approve);
     } finally { this.installingExtensions = false; }
   }
 }

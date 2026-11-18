@@ -70,6 +70,12 @@
       <div class="shortcut-row"><button data-action="overview"><svg><use href="#i-tabs"/></svg>查看全部标签页</button><button data-action="history"><svg><use href="#i-history"/></svg>浏览历史</button><button data-action="passwords"><svg><use href="#i-key"/></svg>密码</button></div>
       <p class="new-tab-note">你的书签、空间与密码，留在你手中。</p>
     </div>
+    <div id="page-error" class="new-tab" hidden>
+      <h1>无法打开此网页</h1>
+      <p id="page-error-url" class="error-url"></p>
+      <p id="page-error-hint" class="error-hint"></p>
+      <button class="button" data-action="retry-page">重新加载</button>
+    </div>
     <div id="little-toolbar" class="page-toolbar drag-region" role="toolbar" aria-label="小窗口工具栏" hidden><span id="little-domain" class="toolbar-spacer"></span><button class="icon" data-action="little-promote" title="嵌入为新标签页" aria-label="嵌入为新标签页"><svg><use href="#i-promote"/></svg></button><button class="icon" data-action="little-close" title="关闭小窗口" aria-label="关闭小窗口"><svg><use href="#i-close"/></svg></button></div>
     <div id="page-toolbar" class="page-toolbar drag-region" role="toolbar" aria-label="页面工具栏">
       <div class="toolbar-leading">

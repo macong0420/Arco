@@ -60,7 +60,7 @@ test('CRX3 signatures bind the zip bytes, the expected id and the public key', t
   // 期望 ID 与签名公钥不符（商店请求了另一个扩展）。
   assert.throws(() => crx.verifyCRX(payload, other.id), /ID 与签名公钥不匹配/);
   // 签名头里声明的 ID 与公钥摘要不符。
-  assert.throws(() => crx.verifyCRX(fixture.signedCRX3(zip, keys, { crxID: fixture.keyID(other.publicKey) }), ID), /ID 与公钥不匹配/);
+  assert.throws(() => crx.verifyCRX(fixture.signedCRX3(zip, keys, { crxID: fixture.keyID(other.publicKey) }), ID), /ID 与签名公钥不匹配/);
   // 截断的签名头与缺少签名的包都被拒绝。
   const truncated = Buffer.from(payload); truncated.writeUInt32LE(1024 * 1024, 8);
   assert.throws(() => crx.verifyCRX(truncated, ID), /截断或超出上限/);
@@ -79,6 +79,7 @@ test('CRX3 signatures bind the zip bytes, the expected id and the public key', t
 test('CRX2 packages are verified with their own public key before unpacking', t => {
   const root = temporary(t), zip = zipOf({ 'manifest.json': JSON.stringify(manifest) }, root);
   assert.equal(crx.verifyCRX(fixture.signedCRX2(zip, keys), ID).zip.toString(), zip.toString());
+  assert.equal(crx.verifyCRX(fixture.signedCRX2(zip, keys)).id, ID);
   assert.throws(() => crx.verifyCRX(fixture.signedCRX2(zip, keys), other.id), /ID 与签名公钥不匹配/);
   const tampered = fixture.signedCRX2(zip, keys); tampered[tampered.length - 1] ^= 0xff;
   assert.throws(() => crx.verifyCRX(tampered, ID), /签名校验失败/);
@@ -108,6 +109,20 @@ test('download follows the update redirect and install unpacks a genuinely signe
   assert.match(seen[0], new RegExp(`x=id%3D${ID}%26uc`));
 });
 
+test('local CRX files derive their ID from the verified signature before unpacking', t => {
+  const root = temporary(t), file = path.join(root, 'local.crx'), target = path.join(root, 'installed');
+  const payload = fixture.signedCRX3(zipOf({ 'manifest.json': JSON.stringify(manifest), 'worker.js': 'self.ready = true;' }, root), keys);
+  fs.writeFileSync(file, payload);
+  assert.deepEqual(crx.installFile(file, target), { id: ID, name: manifest.name, version: manifest.version, manifestVersion: 3 });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(target, 'manifest.json'), 'utf8')).key, keys.publicKey.toString('base64'));
+
+  const corrupted = path.join(root, 'corrupted.crx'), refused = path.join(root, 'refused');
+  payload[payload.length - 1] ^= 0xff;
+  fs.writeFileSync(corrupted, payload);
+  assert.throws(() => crx.installFile(corrupted, refused), /扩展签名校验失败/);
+  assert.equal(fs.existsSync(refused), false);
+});
+
 test('an unsigned or wrongly signed package is refused before anything is written', async t => {
   const root = temporary(t), target = path.join(root, 'ext');
   const zip = zipOf({ 'manifest.json': JSON.stringify(manifest) }, root);
@@ -124,7 +139,7 @@ test('a manifest key that would load the extension under another id is refused',
   const root = temporary(t), target = path.join(root, 'ext');
   const zip = zipOf({ 'manifest.json': JSON.stringify({ ...manifest, key: other.publicKey.toString('base64') }) }, root);
   await serve(t, fixture.signedCRX3(zip, keys));
-  await assert.rejects(() => crx.install(ID, target), /公钥与商店 ID 不一致/);
+  await assert.rejects(() => crx.install(ID, target), /公钥与扩展 ID 不一致/);
   assert.equal(fs.existsSync(target), false);
   // 与商店 ID 一致的 key 可以安装。
   const matching = zipOf({ 'manifest.json': JSON.stringify({ ...manifest, key: keys.publicKey.toString('base64') }) }, root);

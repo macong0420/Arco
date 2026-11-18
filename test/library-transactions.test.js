@@ -7,6 +7,7 @@ const os = require('node:os');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const core = require('../src/core');
+const crx = require('../src/crx');
 
 // Exercise the real persistence code; only the Electron process boundary is substituted.
 function fixture(t) {
@@ -92,10 +93,42 @@ test('failed local extension registration unloads only its new instance and keep
   assert.equal(f.library.installingExtensions, false);
 });
 
+test('local CRX installation requires consent and rolls back failed settings writes', async t => {
+  const f = fixture(t), file = path.join(f.root, 'local.crx');
+  f.library.updateSettings(settings => { settings.extensions = []; }); f.loaded.clear();
+  fs.writeFileSync(file, 'selected CRX');
+  f.library.choose = async type => { assert.equal(type, 'crx'); return file; };
+  const stagePackage = () => t.mock.method(crx, 'installFile', (_source, directory) => {
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'manifest.json'), JSON.stringify({ manifest_version: 3, name: 'Local Fixture', version: '1.0' }));
+    return { id: f.id, name: 'Local Fixture', version: '1.0', manifestVersion: 3 };
+  });
+  stagePackage();
+  const before = f.snapshot();
+  assert.deepEqual(await f.library.installLocalCRX(async asked => {
+    assert.deepEqual(asked, { name: 'Local Fixture', version: '1.0', permissions: [], optional: [] });
+    return false;
+  }), { cancelled: true });
+  f.unchanged(before); assert.equal(f.library.installingExtensions, false);
+
+  f.failWrite();
+  await assert.rejects(() => f.library.installLocalCRX(async () => true), /disk unavailable/);
+  f.unchanged(before); assert.equal(f.loaded.has(f.id), false); assert.equal(f.library.installingExtensions, false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.folder, 'manifest.json'), 'utf8')).name, 'Fixture');
+  t.mock.restoreAll(); stagePackage();
+  const installed = await f.library.installLocalCRX(async () => true);
+  assert.deepEqual([installed.id, installed.name, installed.version, installed.enabled], [f.id, 'Fixture', '1.0', true]);
+  assert(f.loaded.has(f.id));
+  assert.deepEqual(f.library.settings.extensions, [{ id: f.id, path: f.folder, storeID: f.id, enabled: true }]);
+  await f.library.removeExtension(f.id);
+  assert.equal(fs.existsSync(f.folder), false);
+});
+
 test('extension mutations reject overlapping installs and release their guard after validation failure', async t => {
   const f = fixture(t); f.library.installingExtensions = true;
   await assert.rejects(f.library.setExtensionEnabled(f.id, false), /正在安装/);
   await assert.rejects(f.library.addExtension(), /正在安装/);
+  await assert.rejects(() => f.library.installLocalCRX(), /正在安装/);
   f.library.installingExtensions = false;
   await assert.rejects(f.library.setExtensionEnabled('missing', false), /不存在/);
   assert.equal(f.library.installingExtensions, false);

@@ -38,6 +38,9 @@ const userData = process.env.ARCO_USER_DATA_DIR ? path.resolve(process.env.ARCO_
 if (process.platform !== 'darwin' && !testMode) { dialog.showErrorBox('Arco', '此版本仅支持 macOS。'); app.exit(1); }
 app.setPath('userData', userData);
 app.setName('Arco');
+// Electron 默认 UA 在 Chrome 与 Safari 之间插入 Electron/<ver>，并按 UA 判断浏览器的第三方登录页
+// 会把它识别成旧版 Electron（45 < 80 之类）而拒绝登录。Chrome 自己的 macOS UA 经版本缩减后只保留主版本。
+app.userAgentFallback = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome.split('.')[0]}.0.0.0 Safari/537.36`;
 app.enableSandbox();
 // 同一数据目录只允许一个进程写入；第二个实例在读取资料前退出，不复制、不删除旧目录。
 const primaryInstance = app.requestSingleInstanceLock();
@@ -168,7 +171,7 @@ function openLittleWindow(win, rawURL = '') {
   return { id: little.id };
 }
 function broadcast() { for (const win of windows) sendState(win); }
-function publicTab(tab) { const wc = tab.view?.webContents, live = !!wc && !wc.isDestroyed(); return { id: tab.id, webContentsID: live ? wc.id : -1, spaceID: tab.spaceID, url: tab.url, title: tab.title, favicon: tab.favicon, loading: live && wc.isLoading(), canBack: live && wc.navigationHistory.canGoBack(), canForward: live && wc.navigationHistory.canGoForward(), muted: live && wc.isAudioMuted(), playing: live && wc.isCurrentlyAudible(), pinned: tab.pinned, store: tab.loadFailed ? '' : storeID(live ? wc.getURL() : tab.url), zoom: live ? wc.getZoomFactor() : 1, asleep: !tab.view }; }
+function publicTab(tab) { const wc = tab.view?.webContents, live = !!wc && !wc.isDestroyed(); return { id: tab.id, webContentsID: live ? wc.id : -1, spaceID: tab.spaceID, url: tab.url, title: tab.title, favicon: tab.favicon, loading: live && wc.isLoading(), canBack: live && wc.navigationHistory.canGoBack(), canForward: live && wc.navigationHistory.canGoForward(), muted: live && wc.isAudioMuted(), playing: live && wc.isCurrentlyAudible(), pinned: tab.pinned, failed: !!tab.loadFailed, error: tab.loadFailed ? tab.loadError || '' : '', store: tab.loadFailed ? '' : storeID(live ? wc.getURL() : tab.url), zoom: live ? wc.getZoomFactor() : 1, asleep: !tab.view }; }
 function serialize(win) {
   return {
     private: win.private, chromium: process.versions.chrome, tabs: [...win.tabs.values()].map(publicTab), activeID: win.activeID, splitID: win.splitID, splitRatio: win.splitRatio,
@@ -232,16 +235,19 @@ function layout(win) {
   if (win.isDestroyed()) return;
   const [width, height] = win.getContentSize(), side = win.sidebarVisible ? win.sidebarWidth : 0;
   const inset = library.settings.frameInset ? 8 : 0, gap = 8, y = 40 + inset + (win.overlay === 'find' ? 48 : 0);
-  const dock = win.devtoolsDock;
-  const available = Math.max(0, width - side - inset * 2 - (dock ? Math.round(width * 0.48) : 0)), first = win.tabs.get(win.activeID), second = win.tabs.get(win.splitID);
+  const dock = win.devtoolsDock, panel = win.extensionPanel;
+  const panelWidth = panel ? Math.min(420, Math.max(300, Math.round(width * 0.32))) : 0;
+  const available = Math.max(0, width - side - inset * 2 - (dock ? Math.round(width * 0.48) : 0) - panelWidth), first = win.tabs.get(win.activeID), second = win.tabs.get(win.splitID);
   // 密码保存提示不遮挡登录跳转；网页继续可见、可交互，避免看起来像卡住。
   const hidden = !!win.overlay && win.overlay !== 'find';
   // 阅读视图占用整块页面区域；此时底层网页保持隐藏，命令只作用于文章本身。
-  for (const tab of win.tabs.values()) if (tab.view) tab.view.setVisible(!hidden && !win.reader && !!tab.url && (tab.id === win.activeID || tab.id === win.splitID));
+  // 加载失败的网页让位给外壳里的错误页，否则用户只能盯着白屏等一个永远不会来的页面。
+  for (const tab of win.tabs.values()) if (tab.view) tab.view.setVisible(!hidden && !win.reader && !tab.loadFailed && !!tab.url && (tab.id === win.activeID || tab.id === win.splitID));
   if (first?.view) setBounds(first.view, { x: side + inset, y, width: second ? (available - gap) * win.splitRatio : available, height: Math.max(0, height - y - inset) });
   if (second?.view) setBounds(second.view, { x: side + inset + (available - gap) * win.splitRatio + gap, y, width: (available - gap) * (1 - win.splitRatio), height: Math.max(0, height - y - inset) });
   if (win.readerView) { setBounds(win.readerView, { x: side + inset, y, width: available, height: Math.max(0, height - y - inset) }); win.readerView.setVisible(!hidden); }
   if (win.peek) { win.peek.setVisible(!hidden); setBounds(win.peek, { x: side + (width - side) * .1, y: height * .1 + 36, width: (width - side) * .8, height: height * .8 - 36 }); }
+  if (panel) { setBounds(panel.view, { x: width - panelWidth, y: 40 + inset, width: panelWidth, height: Math.max(0, height - 40 - inset) }); panel.view.setVisible(!hidden && !!first?.url); }
   if (dock) setBounds(dock, { x: width - inset - Math.round(width * 0.48), y, width: Math.round(width * 0.48), height: Math.max(0, height - y - inset) });
   setBounds(win.shell, { x: 0, y: 0, width, height });
 }
@@ -261,7 +267,7 @@ function littleWindowOptions(owner) {
 function createWindow(isPrivate = false, url = '', { little = false, owner = null } = {}) {
   const options = little ? littleWindowOptions(owner) : { width: 1280, height: 820, minWidth: 760, minHeight: 500, title: isPrivate ? 'Arco · 无痕窗口' : 'Arco', titleBarStyle: 'hidden', trafficLightPosition: { x: 12, y: 12 }, backgroundColor: '#dce7f7' };
   const win = new BaseWindow(options);
-  Object.assign(win, { tabs: new Map(), activeID: null, splitID: null, splitRatio: 0.5, focusedPaneID: null, peekFocused: false, find: null, httpAuth: null, httpAuthQueue: [], spaceID: library.data.spaces[0].id, private: isPrivate, little, sidebarVisible: !little, sidebarWidth: library.settings.sidebarWidth, capture: null, peek: null, peekURL: '', peekListeners: null, reader: false, readerView: null, overlay: '', snapshots: [], lastActive: new Map(), partition: isPrivate ? 'arco-private-' + core.id() : normalSession });
+  Object.assign(win, { tabs: new Map(), activeID: null, splitID: null, extensionPanel: null, splitRatio: 0.5, focusedPaneID: null, peekFocused: false, find: null, httpAuth: null, httpAuthQueue: [], spaceID: library.data.spaces[0].id, private: isPrivate, little, sidebarVisible: !little, sidebarWidth: library.settings.sidebarWidth, capture: null, peek: null, peekURL: '', peekListeners: null, reader: false, readerView: null, overlay: '', snapshots: [], lastActive: new Map(), partition: isPrivate ? 'arco-private-' + core.id() : normalSession });
   if (isPrivate) setupSession(session.fromPartition(win.partition));
   if (!isPrivate && !little) {
     sessionReady = false;
@@ -280,7 +286,7 @@ function createWindow(isPrivate = false, url = '', { little = false, owner = nul
   win.shell.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.shell.webContents.on('will-navigate', event => event.preventDefault());
   win.shell.webContents.on('before-input-event', (event, input) => { if (pageShortcut(win, input)) event.preventDefault(); });
-  win.on('resize', () => layout(win)); win.on('closed', () => { closeDockedDevTools(win); cancelAuthForWindow(win); clearPasskeyRequests(null, win); for (const tab of win.tabs.values()) if (tab.view && !tab.view.webContents.isDestroyed()) tab.view.webContents.close(); if (win.readerView && !win.readerView.webContents.isDestroyed()) win.readerView.webContents.close(); win.peek?.webContents.close(); if (!win.shell.webContents.isDestroyed()) win.shell.webContents.close(); for (const [id, owner] of popupOwners) if (owner.window === win) popupOwners.delete(id); for (const [id, d] of downloads) if (d.private && d.windowID === win.id) downloads.delete(id); windows.delete(win); });
+  win.on('resize', () => layout(win)); win.on('closed', () => { if (win.extensionPanel && !win.extensionPanel.view.webContents.isDestroyed()) win.extensionPanel.view.webContents.close(); closeDockedDevTools(win); cancelAuthForWindow(win); clearPasskeyRequests(null, win); for (const tab of win.tabs.values()) if (tab.view && !tab.view.webContents.isDestroyed()) tab.view.webContents.close(); if (win.readerView && !win.readerView.webContents.isDestroyed()) win.readerView.webContents.close(); win.peek?.webContents.close(); if (!win.shell.webContents.isDestroyed()) win.shell.webContents.close(); for (const [id, owner] of popupOwners) if (owner.window === win) popupOwners.delete(id); for (const [id, d] of downloads) if (d.private && d.windowID === win.id) downloads.delete(id); windows.delete(win); });
   win.on('close', () => { if (!win.private && !win.little) saveSession(); });
   windows.add(win); layout(win);
   if (isPrivate || little) createTab(win, url, { select: true });
@@ -426,7 +432,7 @@ function attachTab(tab, initialExtensionID = '') {
     guardNavigation(event, url);
   });
   wc.on('will-redirect', guardNavigation);
-  // 商店安装栏的哨兵地址：只有当前页面确实是同一个扩展的商店详情页时才接受。
+  // 商店安装按钮的哨兵地址：只有当前页面确实是同一个扩展的商店详情页时才接受。
   // 注意读 wc.getURL()：did-start-navigation 已经把 tab.url 改成了哨兵地址。
   wc.on('will-navigate', (event, url) => {
     if (!url.startsWith(STORE_INSTALL)) return;
@@ -445,16 +451,18 @@ function attachTab(tab, initialExtensionID = '') {
     if (win.reader && win.readerSource?.tabID === tab.id) closeReader(win, false);
     sendState(win);
   });
-  wc.on('did-navigate', (_, url) => { tab.loadFailed = false; tab.url = url; sendState(win); if (!win.little) saveSession(); });
+  wc.on('did-navigate', (_, url) => { tab.loadFailed = false; tab.loadError = ''; tab.url = url; sendState(win); if (!win.little) saveSession(); });
   wc.on('did-navigate-in-page', (_, url, isMainFrame) => { if (isMainFrame) { tab.url = url; recordHistory(tab); offerStoreInstall(tab); sendState(win); if (!win.little) saveSession(); } });
   wc.on('page-title-updated', (event, title) => { event.preventDefault(); tab.title = title.slice(0, 1000) || '新标签页'; sendState(win); });
   wc.on('page-favicon-updated', (_, icons) => { tab.favicon = icons[0] || ''; if (!win.private && tab.favicon) adoptFavoriteIcon(tab); sendState(win); });
   wc.on('did-finish-load', () => { tab.url = wc.getURL(); recordHistory(tab); offerStoreInstall(tab); sendState(win); });
   wc.on('did-start-loading', () => sendState(win)); wc.on('did-stop-loading', () => sendState(win));
-  wc.on('did-fail-load', (_event, code, _description, _url, isMainFrame) => {
+  wc.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
     if (!isMainFrame || code === -3) return; // Downloads and superseded navigations normally abort.
-    tab.loadFailed = true; tab.url = wc.getURL() || tab.url; tab.title = wc.getTitle() || tab.title; sendState(win);
-    if (tab.view.getVisible()) win.shell.webContents.send('arco:command', 'navigation-failed');
+    // 失败后 wc.getURL() 还停在 about:blank，必须用失败的目标地址，否则地址栏和错误页都会丢掉用户输入的网址。
+    const visible = tab.view.getVisible();
+    tab.loadFailed = true; tab.loadError = description || ''; tab.url = url || wc.getURL() || tab.url; tab.title = wc.getTitle() || tab.title; sendState(win);
+    if (visible) win.shell.webContents.send('arco:command', 'navigation-failed');
   });
   wc.on('audio-state-changed', () => sendState(win));
   wc.on('ipc-message', (event, channel, payload) => {
@@ -489,6 +497,51 @@ function attachTab(tab, initialExtensionID = '') {
     if (input.type === 'keyDown' && input.key === 'Escape' && win.peek) { closePeek(win); event.preventDefault(); }
     else if (pageShortcut(win, input)) event.preventDefault();
   });
+}
+function extensionWindowForTab(tabID) {
+  for (const win of windows) if (!win.isDestroyed() && !win.private && [...win.tabs.values()].some(tab => tab.view?.webContents.id === tabID)) return win;
+  return null;
+}
+function closeExtensionPanel(win, extensionID = '') {
+  const panel = win?.extensionPanel;
+  if (!panel || (extensionID && panel.extensionID !== extensionID)) return;
+  win.extensionPanel = null;
+  if (!panel.view.webContents.isDestroyed()) panel.view.webContents.close();
+  layout(win);
+}
+async function openExtensionPanel(extensionID, details, relativePath, toggle) {
+  const tabWin = Number.isSafeInteger(details.tabId) ? extensionWindowForTab(details.tabId) : null;
+  const owner = Number.isSafeInteger(details.windowId) ? [...windows].find(win => win.id === details.windowId && !win.private && !win.little && !win.isDestroyed()) : null;
+  const win = tabWin || owner || extensionBrowser(details.windowId);
+  if (win.private || win.little) error('无痕或小窗口不能打开扩展侧栏');
+  const tab = Number.isSafeInteger(details.tabId) ? [...win.tabs.values()].find(item => item.view?.webContents.id === details.tabId) : win.tabs.get(win.activeID);
+  if (!tab || tab.id !== win.activeID || !tab.url || !tab.view || tab.view.webContents.isDestroyed()) error('请先选择一个普通网页标签页');
+  if (win.extensionPanel?.extensionID === extensionID && toggle) { closeExtensionPanel(win, extensionID); return; }
+  closeExtensionPanel(win);
+  const url = new URL(extensionHost.url(relativePath, extensionID));
+  if (url.protocol !== 'chrome-extension:' || url.hostname !== extensionID) error('扩展侧栏必须是此扩展自己的页面');
+  const view = new WebContentsView({ webPreferences: { partition: normalSession, contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } });
+  const guard = (event, target) => { try { const url = new URL(extensionHost.url(target, extensionID)); if (url.protocol !== 'chrome-extension:' || url.hostname !== extensionID) throw new Error(); } catch { event.preventDefault(); } };
+  view.webContents.on('will-navigate', guard); view.webContents.on('will-redirect', guard);
+  view.webContents.setWindowOpenHandler(({ url: target }) => {
+    try { const url = new URL(extensionHost.url(target, extensionID)); if (url.protocol !== 'chrome-extension:' || url.hostname !== extensionID) throw new Error(); return { action: 'allow', overrideBrowserWindowOptions: { webPreferences: { session: session.fromPartition(normalSession), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } } }; }
+    catch { return { action: 'deny' }; }
+  });
+  view.webContents.on('did-create-window', child => attachExtensionWindow(child, extensionID, false));
+  win.contentView.addChildView(view); win.extensionPanel = { extensionID, view };
+  layout(win);
+  // 侧栏是原生视图，扩展面板是壳层里的弹层：面板不退出会盖住侧栏，看起来像点了没反应。
+  if (!win.shell.webContents.isDestroyed()) win.shell.webContents.send('arco:command', { command: 'close-modal' });
+  view.webContents.loadURL(url.href).catch(() => closeExtensionPanel(win, extensionID));
+  return url.href;
+}
+function resolveDebuggerTarget(tabID) {
+  for (const win of windows) {
+    if (win.isDestroyed() || win.private || win.little) continue;
+    const tab = [...win.tabs.values()].find(item => item.view?.webContents.id === tabID);
+    if (tab) return tab.view.webContents;
+  }
+  return null;
 }
 function extensionBrowser(windowID) {
   const ordinary = [...windows].filter(win => !win.private && !win.little && !win.isDestroyed());
@@ -560,51 +613,112 @@ function storeID(raw) {
     return /^[a-p]{32}$/.test(id) ? id : '';
   } catch { return ''; }
 }
-// 商店页面的“添加至 Chrome”在 Electron 里无效，所以注入一条 Arco 自己的安装栏，点它通过哨兵地址回到主进程。
+// 商店页面的“添加至 Chrome”在 Electron 里只会抛错，所以接管这个按钮：点它走 Arco 自己的下载、
+// 校验与确认流程，交互和 Chrome 一致，不需要在商店页顶部再加一条 Arco 安装栏。
+// 商店在非 Chrome 或未登录时会禁用按钮并插入“安装 Chrome”推广条；Arco 用不了商店账号，
+// 所以恢复按钮并把推广条藏掉——安装确认、签名校验和权限列表仍由 Arco 自己完成。
 const STORE_INSTALL = 'https://arco-install.invalid/';
-function storeBannerScript(id) {
+function storeInstallScript() {
   return `(() => {
-    document.getElementById('arco-store-install')?.remove();
-    const host = document.createElement('div');
-    host.id = 'arco-store-install';
-    host.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;gap:12px;padding:9px 14px;background:#292b32;color:#fff;font:13px -apple-system,"PingFang SC",sans-serif;box-shadow:0 2px 14px rgba(0,0,0,.28)';
-    const text = document.createElement('span');
-    text.textContent = '商店里的“添加至 Chrome”在 Arco 里不生效，用这里安装：';
-    const install = document.createElement('button');
-    install.textContent = '安装此扩展';
-    install.style.cssText = 'border:0;border-radius:13px;padding:5px 14px;background:#fff;color:#292b32;font:inherit;cursor:pointer';
-    install.addEventListener('click', () => { location.href = ${JSON.stringify(STORE_INSTALL)} + ${JSON.stringify(id)}; });
-    const close = document.createElement('button');
-    close.textContent = '×';
-    close.setAttribute('aria-label', '关闭');
-    close.style.cssText = 'border:0;background:none;color:#fff;font:16px -apple-system,sans-serif;cursor:pointer;opacity:.7';
-    close.addEventListener('click', () => host.remove());
-    host.append(text, install, close);
-    document.documentElement.appendChild(host);
+    if (window.__arcoStoreInstall) return;
+    const LABEL = /^(添加至 Chrome|Add to Chrome|Chrome に追加|Chrome에 추가|Ajouter à Chrome|Zu Chrome hinzufügen|Añadir a Chrome|Adicionar ao Chrome|Добавить в Chrome|Dodaj do Chrome)$/i;
+    const PROMO = /^(安装 Chrome|Install Chrome)$/i;
+    const isInstall = node => LABEL.test((node.getAttribute('aria-label') || '').trim()) || LABEL.test((node.textContent || '').trim());
+    const hidePromo = node => {
+      let banner = node;
+      while (banner.parentElement && (banner.parentElement.textContent || '').trim().length <= 80) banner = banner.parentElement;
+      banner.style.display = 'none';
+    };
+    let pending = false;
+    const refresh = () => {
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(() => {
+        pending = false;
+        for (const node of document.querySelectorAll('button')) {
+          if (node.disabled && isInstall(node)) node.disabled = false;
+          else if (PROMO.test((node.textContent || '').trim())) hidePromo(node);
+        }
+      });
+    };
+    window.__arcoStoreInstall = event => {
+      for (const node of event.composedPath()) {
+        if (!node || node.nodeType !== 1 || typeof node.matches !== 'function' || !node.matches('button,[role="button"]')) continue;
+        if (!isInstall(node)) continue;
+        const id = location.pathname.split('/').find(part => /^[a-p]{32}$/.test(part));
+        if (!id) return;
+        event.preventDefault(); event.stopImmediatePropagation();
+        location.href = ${JSON.stringify(STORE_INSTALL)} + id;
+        return;
+      }
+    };
+    window.addEventListener('click', window.__arcoStoreInstall, true);
+    refresh();
+    new MutationObserver(refresh).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
   })()`;
 }
 function offerStoreInstall(tab) {
   const id = storeID(tab.url);
   if (!id || !tab.view || tab.view.webContents.isDestroyed()) return;
-  tab.view.webContents.executeJavaScript(storeBannerScript(id), true).catch(() => {});
+  tab.view.webContents.executeJavaScript(storeInstallScript(), true).catch(() => {});
 }
 // 安装过程中界面只看到一句进度：下载校验与加载都很快，细分阶段反而闪得看不清。
 function reportInstall(win, state, message) {
   if (win.isDestroyed() || win.shell.webContents.isDestroyed()) return;
   win.shell.webContents.send('arco:command', { command: 'store-install-status', state, message });
 }
+// 权限按 Chrome 安装弹窗的读法转成一句话；没收录的权限保留原名，不隐瞒。
+const PERMISSION_TEXT = {
+  activeTab: '读取你点击扩展图标时所在标签页的信息', alarms: '安排定时任务', bookmarks: '读取和更改你的书签', browsingData: '清除你的浏览数据',
+  clipboardRead: '读取你复制到剪贴板的内容', clipboardWrite: '修改你复制到剪贴板的内容', contentSettings: '更改网站内容设置', contextMenus: '在右键菜单中添加项目',
+  cookies: '读取和更改 Cookie', debugger: '附加到网页，读取和控制页面内容', declarativeNetRequest: '拦截和修改网络请求', downloads: '管理你的下载',
+  fontSettings: '更改字体设置', history: '读取和更改浏览记录', identity: '获取你的 Google 账号信息', management: '管理其他扩展', notifications: '显示通知',
+  offscreen: '在后台页面中运行', pageCapture: '把网页保存为 MHTML', power: '保持电脑唤醒', privacy: '更改隐私相关设置', proxy: '更改代理设置',
+  readingList: '读取和更改阅读清单', scripting: '在你的网页中运行脚本', search: '使用你当前的搜索引擎', sessions: '读取最近关闭的标签页',
+  sidePanel: '在浏览器侧栏中显示内容', storage: '在本机存储数据', 'system.cpu': '读取 CPU 信息', 'system.memory': '读取内存信息', 'system.storage': '读取存储设备信息',
+  tabGroups: '管理标签组', tabs: '读取你的浏览记录和标签页', topSites: '读取你最常访问的网站', unlimitedStorage: '在本机存储不限量的数据',
+  webNavigation: '读取网页导航状态', webRequest: '拦截和修改网络请求', webRequestBlocking: '拦截和修改网络请求'
+};
+function permissionText(permission) {
+  if (PERMISSION_TEXT[permission]) return PERMISSION_TEXT[permission];
+  if (permission === '<all_urls>') return '读取和更改你在所有网站上的数据';
+  try {
+    const url = new URL(permission.replace(/^\*:\/\//, 'https://'));
+    if (url.protocol === 'http:' || url.protocol === 'https:') return `读取和更改你在 ${url.hostname === '*' ? '所有网站' : url.hostname} 上的数据`;
+  } catch {}
+  return permission;
+}
+async function approveExtension(win, asked, local = false) {
+  if (testMode) return testStoreApproval;
+  const permissions = [...new Set(asked.permissions)].map(permissionText);
+  const details = [
+    `版本 ${asked.version}`,
+    permissions.length ? `此扩展可以：\n• ${permissions.join('\n• ')}` : '此扩展不需要额外权限。',
+    asked.optional.length ? `可选权限（安装后按需请求）：${[...new Set(asked.optional)].map(permissionText).join('、')}` : '',
+    asked.permissions.includes('debugger') ? 'debugger 可读取和控制已授权的网页标签，并可向网页上传控件提供你选择的本地文件；Arco 限制为普通网页标签，不含无痕窗口。' : '',
+    local ? '本地扩展由你选择来源；请只安装信任的代码。' : '扩展签名、扩展 ID 与包内容已在本机校验。'
+  ].filter(Boolean).join('\n');
+  const answer = await dialog.showMessageBox(win, { type: 'question', buttons: ['取消', '添加扩展程序'], defaultId: 1, cancelId: 0, message: `添加“${asked.name}”？`, detail: details.slice(0, 2000) });
+  return answer.response === 1;
+}
 async function installFromStore(win, input) {
   if (win.private) error('无痕窗口不能安装扩展');
   reportInstall(win, 'progress', '正在下载并校验扩展…');
-  const result = await library.installFromStore(input, testMode ? async () => testStoreApproval : async asked => {
-    const detail = [`权限：${asked.permissions.join('、') || '无'}`, asked.optional.length ? `可选权限：${asked.optional.join('、')}` : '', '扩展签名、扩展 ID 与包内容已在本机校验。'].filter(Boolean).join('\n');
-    const answer = await dialog.showMessageBox(win, { type: 'question', buttons: ['取消', '安装'], defaultId: 0, cancelId: 0, message: `安装 ${asked.name} ${asked.version}？`, detail: detail.slice(0, 2000) });
-    return answer.response === 1;
-  });
+  const result = await library.installFromStore(input, asked => approveExtension(win, asked));
   if (result.cancelled) { reportInstall(win, 'info', '已取消安装'); return { cancelled: true, list: await library.extensionList() }; }
   broadcast();
   if (!win.shell.webContents.isDestroyed()) win.shell.webContents.send('arco:command', { command: 'store-installed', message: result.already ? '这个扩展已经装好了' : `已安装 ${result.name || '扩展'}` });
   return result;
+}
+async function installLocalCRX(win) {
+  if (win.private) error('无痕窗口不能安装扩展');
+  reportInstall(win, 'progress', '正在读取并校验本地 CRX…');
+  const result = await library.installLocalCRX(asked => approveExtension(win, asked, true));
+  if (!result) { reportInstall(win, 'info', '已取消安装'); return null; }
+  if (result.cancelled) { reportInstall(win, 'info', '已取消安装'); return { cancelled: true, list: await library.extensionList() }; }
+  broadcast();
+  if (!win.shell.webContents.isDestroyed()) win.shell.webContents.send('arco:command', { command: 'store-installed', message: `已安装 ${result.name || '扩展'}` });
+  return { ...result, list: await library.extensionList() };
 }
 function safeCaptureOrigin(value) { try { const url = new URL(core.webURL(value)); if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return null; return url.origin; } catch { return null; } }
 function selectTab(win, tabID) {
@@ -855,10 +969,8 @@ function setupSession(ses) {
   });
 }
 // 常驻网站的图标只存地址会被网站的 404/204/防盗链拖死，所以取到字节后存成 data URL；
-// 地址失效时再从首页的 <link rel="icon"> 重新解析一次。
-// 站点（尤其 Cloudflare 前置的）会按 UA 拦截 Electron 默认 UA，取图标时用去掉 Electron 标记的浏览器 UA。
-const iconUserAgent = () => session.fromPartition(normalSession).getUserAgent().replace(/\sElectron\/[\d.]+/i, '');
-const iconFetch = (url, init = {}) => session.fromPartition(normalSession).fetch(url, { ...init, headers: { ...init.headers, 'User-Agent': iconUserAgent() } });
+// 地址失效时再从首页的 <link rel="icon"> 重新解析一次。会话 UA 已是正常 Chrome UA，站点不会按 Electron 拦截。
+const iconFetch = (url, init = {}) => session.fromPartition(normalSession).fetch(url, init);
 const ICON_MAX = 256 * 1024, ICON_TYPES = /^image\/(png|jpeg|gif|webp|svg\+xml|x-icon|vnd\.microsoft\.icon|bmp|avif)$/;
 // 有些站点会用 image/* 的内容类型返回错误页，按魔数确认真的是图片，避免把 HTML 缓存成图标。
 function looksLikeImage(type, bytes) {
@@ -921,7 +1033,7 @@ function adoptFavoriteIcon(tab) {
   iconAttempts.add(favorite.id);
   cacheFavoriteIcon({ ...favorite, favicon: tab.favicon }).catch(() => {});
 }
-const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'refresh-favorite-icon', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'migrate-browser-data', 'import-browser', 'chrome-extensions', 'import-chrome-extensions', 'install-extension-store', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-search', 'history-delete', 'little-window', 'little-promote', 'little-close', 'translate', 'history-clear', 'save-page', 'clear-site-data', 'default-browser', 'download-open', 'download-reveal', 'download-cancel', 'download-pause', 'download-resume', 'find', 'find-stop', 'passkey-cancel', 'http-auth-submit', 'http-auth-cancel', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'open-system-passwords', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'remove-extension', 'extension-list', 'extension-toggle', 'extension-popup', 'copy', 'menu', 'confirm-clear']);
+const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'refresh-favorite-icon', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'migrate-browser-data', 'import-browser', 'chrome-extensions', 'import-chrome-extensions', 'install-extension-store', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-search', 'history-delete', 'little-window', 'little-promote', 'little-close', 'translate', 'history-clear', 'save-page', 'clear-site-data', 'default-browser', 'download-open', 'download-reveal', 'download-cancel', 'download-pause', 'download-resume', 'find', 'find-stop', 'passkey-cancel', 'http-auth-submit', 'http-auth-cancel', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'open-system-passwords', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'install-local-crx', 'remove-extension', 'extension-list', 'extension-toggle', 'extension-popup', 'copy', 'menu', 'confirm-clear']);
 function trustedWindow(event) {
   const win = [...windows].find(w => w.shell.webContents === event.sender);
   if (!win || event.senderFrame !== win.shell.webContents.mainFrame || event.senderFrame.url !== pathToFileURL(path.join(__dirname, 'shell.html')).href) error('未授权的界面请求');
@@ -1153,7 +1265,8 @@ ipcMain.handle('arco:invoke', async (event, message) => {
         } finally { migrationPending = false; }
       }
       case 'export-passwords': { if (win.private) error('无痕窗口不能导出密码'); const accepted = await dialog.showMessageBox(win, {type:'warning', buttons:['取消','导出明文'],defaultId:0,cancelId:0,message:'导出的 CSV 包含未加密密码。确定继续？'}); if (accepted.response !== 1) return false; await vault.authenticate(); const result = await dialog.showSaveDialog(win, { defaultPath: 'Arco-Passwords.csv', filters: [{ name: '明文 CSV（请妥善保管）', extensions: ['csv'] }] }); if (!result.filePath) return false; const credentials = await vault.list(), lines = ['name,url,username,password']; for (const item of credentials) { const full = await vault.read(item.id); const escape = value => '"' + String(value).replaceAll('"', '""') + '"'; lines.push([full.title, full.origin, full.username, full.password].map(escape).join(',')); } fs.writeFileSync(result.filePath, '\ufeff' + lines.join('\n'), { mode: 0o600 }); return true; }
-      case 'add-extension': if (win.private) error('无痕窗口不能安装扩展'); return await library.addExtension();
+      case 'add-extension': if (win.private) error('无痕窗口不能安装扩展'); return await library.addExtension(asked => approveExtension(win, asked, true));
+      case 'install-local-crx': { try { return await installLocalCRX(win); } catch (cause) { reportInstall(win, 'error', cause.message); throw cause; } }
       case 'extension-list': if (win.private) error('无痕窗口不能管理扩展'); return await library.extensionList();
       case 'extension-toggle': if (win.private) error('无痕窗口不能管理扩展'); return await library.setExtensionEnabled(bounded(a.id, 200), !!a.enabled);
       case 'extension-popup': return await openExtensionPopup(win, bounded(a.id, 200), a.anchor || {});
@@ -1485,6 +1598,16 @@ app.whenReady().then(async () => {
     attachWindow: attachExtensionWindow,
     createTab: createExtensionTab,
     createWindow: createExtensionWindow,
+    resolveDebuggerTarget,
+    openSidePanel: openExtensionPanel,
+    closeSidePanel(extensionID, tabID) { for (const win of windows) if (win.extensionPanel?.extensionID === extensionID && (!Number.isSafeInteger(tabID) || win.tabs.get(win.activeID)?.view?.webContents.id === tabID)) closeExtensionPanel(win, extensionID); },
+    windowFor(event) { try { return trustedWindow(event); } catch { return null; } },
+    // 扩展面板开着时网页是隐藏的，提示条不会被网页盖住；点击已经打开新页面时不再打扰。
+    report(win, message) {
+      if (!win || win.isDestroyed() || win.shell.webContents.isDestroyed() || !message) return;
+      if (win.overlay !== 'extensions') return;
+      win.shell.webContents.send('arco:command', { command: 'toast', message });
+    },
     selectTab(wc, owner) {
       if (windows.has(owner)) { const tab = [...owner.tabs.values()].find(t => t.view?.webContents === wc); if (tab && owner.activeID !== tab.id) selectTab(owner, tab.id); }
       else if (!owner.isDestroyed()) owner.focus();
@@ -1528,6 +1651,22 @@ if (testMode) {
     if (!testMode || ![...windows].some(w => w.shell.webContents === event.sender)) throw new Error('Forbidden');
     const { action, payload } = request || {};
     const win = trustedWindow(event);
+    if (action === 'extension-install-directory') {
+      const directory = bounded(payload?.directory, 4096);
+      if (!path.isAbsolute(directory)) throw new Error('Invalid extension directory');
+      return library.addExtension(async () => testStoreApproval, directory);
+    }
+    if (action === 'extension-action-click') {
+      const id = bounded(payload?.id, 128), tab = awakeTab(win), details = { eventType: 'click', extensionId: id, tabId: tab.view.webContents.id, anchorRect: { x: 0, y: 0, width: 24, height: 24 }, alignment: 'bottom left' };
+      await win.shell.webContents.executeJavaScript(`window.browserAction.activate('persist:arco', ${JSON.stringify(details)})`, true);
+      return { panel: win.extensionPanel?.extensionID === id, workerReady: extensionHost.sidePanelReady(id) };
+    }
+    if (action === 'extension-panel-evaluate') {
+      const source = bounded(payload?.script, 20000), panel = win.extensionPanel;
+      if (!panel || panel.view.webContents.isDestroyed()) throw new Error('No extension panel');
+      return panel.view.webContents.executeJavaScript(source, true);
+    }
+    if (action === 'native-stack') return win.contentView.children.map(view => ({ url: view.webContents?.getURL() || '', visible: view.getVisible(), bounds: view.getBounds() }));
     if (action === 'state') return serialize(win);
     if (action === 'close-window') { setImmediate(()=>win.close()); return true; }
     if (action === 'views') return [...win.tabs.values()].map(t=>({id:t.id,url:t.url,visible:!!t.view&&t.view.getVisible(),bounds:t.view?t.view.getBounds():null,webContentsID:t.view?t.view.webContents.id:-1}));

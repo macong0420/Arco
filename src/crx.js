@@ -58,11 +58,13 @@ function keyID(publicKey) {
   if (!Buffer.isBuffer(publicKey) || publicKey.length < 32 || publicKey.length > 8192) throw new Error('扩展公钥无效');
   return crypto.createHash('sha256').update(publicKey).digest().subarray(0, 16);
 }
-function extensionIDFromKey(publicKey) {
+function extensionIDFromBytes(bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length !== 16) throw new Error('扩展 ID 摘要无效');
   let id = '';
-  for (const byte of keyID(publicKey)) id += String.fromCharCode(97 + (byte >> 4), 97 + (byte & 15));
+  for (const byte of bytes) id += String.fromCharCode(97 + (byte >> 4), 97 + (byte & 15));
   return id;
 }
+function extensionIDFromKey(publicKey) { return extensionIDFromBytes(keyID(publicKey)); }
 // 手写 protobuf 读取：只接受已知的长度字段，拒绝截断、溢出、重复和未知字段。
 function readVarint(buffer, offset, limit) {
   let value = 0, shift = 0, index = offset;
@@ -121,21 +123,22 @@ function parseCRX3Header(header) {
   if (!signedHeaderData) throw new Error('crx 文件缺少签名数据');
   return { proofs, signedHeaderData };
 }
-// 校验期望 ID、公钥摘要、签名和 zip 字节绑定，返回已通过校验的 zip 与认证过的开发者公钥。失败时不会写任何文件。
+// 校验签名、公钥摘要和 zip 字节绑定；期望 ID 可选，用于本地包从签名推导身份。
 function verifyCRX(buffer, expectedID) {
-  if (!ID.test(String(expectedID || ''))) throw new Error('扩展 ID 无效');
+  if (expectedID !== undefined && !ID.test(String(expectedID || ''))) throw new Error('扩展 ID 无效');
   if (!Buffer.isBuffer(buffer) || buffer.length < 16 || buffer.subarray(0, 4).toString('binary') !== 'Cr24') throw new Error('不是有效的 crx 文件');
   const version = buffer.readUInt32LE(4);
   if (version === 3) {
     const headerSize = buffer.readUInt32LE(8), headerEnd = 12 + headerSize;
     if (!headerSize || headerSize > MAX_HEADER || headerEnd >= buffer.length) throw new Error('crx 文件头已截断或超出上限');
     const { proofs, signedHeaderData } = parseCRX3Header(buffer.subarray(12, headerEnd)), zip = buffer.subarray(headerEnd);
-    const signedID = parseSignedData(signedHeaderData);
+    const signedID = parseSignedData(signedHeaderData), id = extensionIDFromBytes(signedID);
+    if (expectedID && id !== expectedID) throw new Error('扩展 ID 与签名公钥不匹配');
     const length = Buffer.alloc(4); length.writeUInt32LE(signedHeaderData.length);
     const signed = Buffer.concat([CRX3_MAGIC, length, signedHeaderData, zip]);
     let matched = null;
     for (const proof of proofs) {
-      if (extensionIDFromKey(proof.publicKey) !== expectedID) continue;
+      if (extensionIDFromKey(proof.publicKey) !== id) continue;
       let key;
       try { key = crypto.createPublicKey({ key: proof.publicKey, format: 'der', type: 'spki' }); }
       catch { throw new Error('crx 签名公钥无效'); }
@@ -145,18 +148,19 @@ function verifyCRX(buffer, expectedID) {
       matched = Buffer.from(proof.publicKey); break;
     }
     if (!matched) throw new Error('扩展 ID 与签名公钥不匹配');
-    return { zip, publicKey: matched };
+    return { zip, publicKey: matched, id };
   }
   if (version === 2) {
     const keyLength = buffer.readUInt32LE(8), signatureLength = buffer.readUInt32LE(12), start = 16 + keyLength + signatureLength;
     if (!keyLength || !signatureLength || keyLength > MAX_HEADER || signatureLength > MAX_HEADER || start >= buffer.length) throw new Error('crx 文件头已截断或超出上限');
     const publicKey = buffer.subarray(16, 16 + keyLength), signature = buffer.subarray(16 + keyLength, start), zip = buffer.subarray(start);
-    if (extensionIDFromKey(publicKey) !== expectedID) throw new Error('扩展 ID 与签名公钥不匹配');
+    const id = extensionIDFromKey(publicKey);
+    if (expectedID && id !== expectedID) throw new Error('扩展 ID 与签名公钥不匹配');
     let key;
     try { key = crypto.createPublicKey({ key: publicKey, format: 'der', type: 'spki' }); }
     catch { throw new Error('crx 签名公钥无效'); }
     if (!crypto.verify('sha1', zip, key, signature)) throw new Error('扩展签名校验失败');
-    return { zip, publicKey: Buffer.from(publicKey) };
+    return { zip, publicKey: Buffer.from(publicKey), id };
   }
   throw new Error('不支持的 crx 版本');
 }
@@ -185,16 +189,16 @@ function manifestOf(directory, expectedID, publicKey) {
   try { manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8')); }
   catch { throw new Error('扩展包里没有有效的 manifest.json'); }
   if (!manifest || typeof manifest.name !== 'string' || typeof manifest.version !== 'string' || !manifest.manifest_version) throw new Error('扩展的 manifest.json 不完整');
-  if (!Buffer.isBuffer(publicKey) || extensionIDFromKey(publicKey) !== expectedID) throw new Error('签名公钥与商店 ID 不一致');
+  if (!Buffer.isBuffer(publicKey) || extensionIDFromKey(publicKey) !== expectedID) throw new Error('签名公钥与扩展 ID 不一致');
   // manifest 的 key 决定 Electron 加载时使用的扩展 ID：只能来自已验证的签名公钥，不能凭 manifest 自报身份。
   if (manifest.key !== undefined) {
     if (typeof manifest.key !== 'string' || !manifest.key) throw new Error('扩展包声明的公钥无效');
     let declared;
     try { declared = Buffer.from(manifest.key, 'base64'); crypto.createPublicKey({ key: declared, format: 'der', type: 'spki' }); }
     catch { throw new Error('扩展包声明的公钥无效'); }
-    if (extensionIDFromKey(declared) !== expectedID) throw new Error('扩展包声明的公钥与商店 ID 不一致，已拒绝安装');
+    if (extensionIDFromKey(declared) !== expectedID) throw new Error('扩展包声明的公钥与扩展 ID 不一致，已拒绝安装');
   }
-  // 商店包常常不声明 key；缺失时补上已认证的开发者公钥，否则 Electron 会按解压目录生成另一个 ID。
+  // 未声明 key 的 CRX 在解包时补入已认证公钥，否则 Electron 会按解压目录生成另一个 ID。
   const canonical = publicKey.toString('base64');
   if (manifest.key !== canonical) {
     manifest.key = canonical;
@@ -202,13 +206,25 @@ function manifestOf(directory, expectedID, publicKey) {
   }
   return { name: manifest.name, version: manifest.version, manifestVersion: manifest.manifest_version };
 }
+function installBuffer(buffer, directory, expectedID) {
+  if (buffer.length > LIMIT) throw new Error('扩展文件超过 128 MB');
+  const { zip, publicKey, id } = verifyCRX(buffer, expectedID);
+  fs.rmSync(directory, { recursive: true, force: true });
+  try { unpack(zip, directory); return { id, ...manifestOf(directory, id, publicKey) }; }
+  catch (error) { fs.rmSync(directory, { recursive: true, force: true }); throw error; }
+}
+// 本地包按签名公钥推导 ID；签名只证明包内容与密钥绑定，不代表商店审核或发布者身份认证。
+function installFile(file, directory) {
+  const stats = fs.statSync(file);
+  if (!stats.isFile()) throw new Error('请选择 CRX 文件');
+  if (stats.size > LIMIT) throw new Error('扩展文件超过 128 MB');
+  const buffer = fs.readFileSync(file);
+  return installBuffer(buffer, directory);
+}
 // 下载 → 校验签名/ID/公钥/zip → 解包 → 用已认证公钥固定 manifest 身份；任一步失败都不留下安装目录。
 async function install(id, directory) {
   const storeID = extensionID(id);
-  const buffer = await download(storeID);
-  const { zip, publicKey } = verifyCRX(buffer, storeID);
-  fs.rmSync(directory, { recursive: true, force: true });
-  try { unpack(zip, directory); return manifestOf(directory, storeID, publicKey); }
-  catch (error) { fs.rmSync(directory, { recursive: true, force: true }); throw error; }
+  const result = installBuffer(await download(storeID), directory, storeID);
+  return { name: result.name, version: result.version, manifestVersion: result.manifestVersion };
 }
-module.exports = { extensionID, updateURL, download, verifyCRX, unpack, install, extensionIDFromKey, ID };
+module.exports = { extensionID, updateURL, download, verifyCRX, unpack, install, installFile, extensionIDFromKey, ID };
