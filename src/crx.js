@@ -51,6 +51,27 @@ function fetch(url, redirects = 0) {
   });
 }
 function download(id) { return fetch(updateURL(extensionID(id))); }
+// Omaha 更新协议：只取版本号，不下载整包。status 可能是 ok / noupdate。
+function updateCheckURL(id) {
+  return `${CRX_ORIGIN()}/service/update2/crx?response=updatecheck&prodversion=${process.versions.chrome || '120.0.0.0'}&acceptformat=crx3&x=id%3D${extensionID(id)}%26uc`;
+}
+function parseUpdateCheck(xml) {
+  const tag = String(xml).match(/<updatecheck\b[^>]*>/i)?.[0] || '';
+  if (!/\bstatus="(?:ok|noupdate)"/i.test(tag)) return null;
+  if (/\bstatus="noupdate"/i.test(tag)) return null;
+  const version = tag.match(/\bversion="([^"]+)"/i)?.[1] || '';
+  if (!/^\d+(\.\d+){0,3}$/.test(version)) throw new Error('更新接口返回的版本号无效');
+  return version;
+}
+async function checkUpdate(id) { return parseUpdateCheck((await fetch(updateCheckURL(extensionID(id)))).toString('utf8')); }
+function compareVersions(a, b) {
+  const left = String(a || '').split('.').map(Number), right = String(b || '').split('.').map(Number);
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    const x = left[index] || 0, y = right[index] || 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  return 0;
+}
 // CRX3 签名覆盖 "CRX3 SignedData\0" + 长度 + SignedData + 完整 zip 字节；CRX2 签名直接覆盖 zip。
 const CRX3_MAGIC = Buffer.from('CRX3 SignedData\0', 'binary');
 const MAX_HEADER = 1024 * 1024;
@@ -227,4 +248,4 @@ async function install(id, directory) {
   const result = installBuffer(await download(storeID), directory, storeID);
   return { name: result.name, version: result.version, manifestVersion: result.manifestVersion };
 }
-module.exports = { extensionID, updateURL, download, verifyCRX, unpack, install, installFile, extensionIDFromKey, ID };
+module.exports = { extensionID, updateURL, updateCheckURL, parseUpdateCheck, checkUpdate, compareVersions, download, verifyCRX, unpack, install, installFile, extensionIDFromKey, ID };

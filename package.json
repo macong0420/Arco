@@ -40,7 +40,8 @@
         "CFBundleURLTypes": [{ "CFBundleURLName": "Web site URL", "CFBundleTypeRole": "Viewer", "CFBundleURLSchemes": ["http", "https"] }],
         "NSUserNotificationUsageDescription": "Arco 显示网站通知。",
         "NSCameraUsageDescription": "网站需要你的许可才能使用相机。",
-        "NSMicrophoneUsageDescription": "网站需要你的许可才能使用麦克风。"
+        "NSMicrophoneUsageDescription": "网站需要你的许可才能使用麦克风。",
+        "NSLocationUsageDescription": "网站需要你的许可才能获取你的位置。"
       }
     },
     "directories": { "output": "dist" }

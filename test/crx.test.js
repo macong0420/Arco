@@ -165,3 +165,15 @@ test('a package without a usable manifest is refused', async t => {
   await assert.rejects(() => crx.install(ID, target), /manifest\.json/);
   assert.equal(fs.existsSync(target), false);
 });
+
+test('update checks read the advertised version without downloading a package', () => {
+  assert.equal(crx.parseUpdateCheck('<gupdate><app><updatecheck status="noupdate"/></app></gupdate>'), null);
+  assert.equal(crx.parseUpdateCheck('<gupdate><app><updatecheck codebase="x" status="ok" version="4.9.135"/></app></gupdate>'), '4.9.135');
+  assert.equal(crx.parseUpdateCheck('<gupdate><app><updatecheck status="ok" version="1.0"/></app></gupdate>'), '1.0');
+  assert.throws(() => crx.parseUpdateCheck('<updatecheck status="ok" version="latest"/>'), /版本号无效/);
+  assert.equal(crx.parseUpdateCheck('<gupdate><app status="error"/></gupdate>'), null);
+  assert.equal(crx.compareVersions('1.10.0', '1.9.9'), 1);
+  assert.equal(crx.compareVersions('1.0', '1.0.0'), 0);
+  assert.equal(crx.compareVersions('2', '10'), -1);
+  assert.match(crx.updateCheckURL(ID), /response=updatecheck/);
+});

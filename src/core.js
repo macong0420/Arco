@@ -67,7 +67,7 @@ function validateShortcuts(value) {
 }
 function initialLibrary() {
   const space = stamp({ id: 'personal', name: '个人', color: 'sky', customColor: '', bookmarks: [], folders: [] });
-  return { version: 1, spaces: [space], favorites: [], tombstones: {}, settings: { shortcuts: { ...DEFAULT_SHORTCUTS }, engine: 'google', sidebarWidth: 240, frameInset: true, trackerBlocking: true, theme: 'system', devtoolsMode: 'detach', linkOpenMode: 'tab', onboarded: false, syncFolder: '', syncStatus: '', extensions: [] }, updatedAt: now() };
+  return { version: 1, spaces: [space], favorites: [], tombstones: {}, settings: { shortcuts: { ...DEFAULT_SHORTCUTS }, engine: 'google', sidebarWidth: 240, frameInset: true, trackerBlocking: true, theme: 'system', devtoolsMode: 'detach', linkOpenMode: 'tab', tabSleepMinutes: 60, askDownloadPath: false, openDownloadedFiles: false, sitePermissions: {}, contentSettings: {}, zoomByOrigin: {}, onboarded: false, syncFolder: '', syncStatus: '', extensions: [] }, updatedAt: now() };
 }
 function validRecord(record) {
   return record && typeof record.id === 'string' && !['__proto__','constructor','prototype'].includes(record.id) && /^[\w-]{1,128}$/.test(record.id) && typeof record.updatedAt === 'string' && Number.isFinite(Date.parse(record.updatedAt));
@@ -392,4 +392,40 @@ function parseFirefoxTree(rows) {
   }
   return result;
 }
-module.exports = { DEFAULT_SHORTCUTS, validateShortcuts, ENGINES, webURL, navigate, exactOrigin, originAllowed, id, now, text, secret, stamp, initialLibrary, validateLibrary, mergeLibraries, atomicWrite, loadJSON, reorder, deleteRecords, parseChromiumBookmarks, parseNetscape, netscape, parseCSV, parseArcSidebar, parsePlistXML, parseSafariBookmarks, parseFirefoxTree };
+const SITE_PERMISSIONS = ['media', 'geolocation', 'notifications', 'clipboard-read', 'clipboard-sanitized-write'];
+// 网站权限来自用户选择，也可能来自损坏/手改的 Library.json：只保留已知来源与已知权限。
+function sanitizeSitePermissions(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result = {};
+  for (const [origin, entry] of Object.entries(value).slice(-500)) {
+    if (typeof origin !== 'string' || origin.length > 300 || !entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    try { if (!/^https?:$/.test(new URL(origin).protocol)) continue; } catch { continue; }
+    const decisions = {};
+    for (const permission of SITE_PERMISSIONS) if (entry[permission] === 'allow' || entry[permission] === 'deny') decisions[permission] = entry[permission];
+    if (Object.keys(decisions).length) result[origin] = decisions;
+  }
+  return result;
+}
+// 内容设置与每站点缩放同样来自用户选择：只保留 http(s) 来源和已知开关。
+function sanitizeContentSettings(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result = {};
+  for (const [origin, entry] of Object.entries(value).slice(-500)) {
+    if (typeof origin !== 'string' || origin.length > 300) continue;
+    try { if (!/^https?:$/.test(new URL(origin).protocol)) continue; } catch { continue; }
+    if (entry?.images === false) result[origin] = { images: false };
+  }
+  return result;
+}
+function sanitizeZoomByOrigin(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result = {};
+  for (const [origin, factor] of Object.entries(value).slice(-500)) {
+    if (typeof origin !== 'string' || origin.length > 300) continue;
+    try { if (!/^https?:$/.test(new URL(origin).protocol)) continue; } catch { continue; }
+    const number = Number(factor);
+    if (Number.isFinite(number) && number >= 0.25 && number <= 5 && number !== 1) result[origin] = number;
+  }
+  return result;
+}
+module.exports = { DEFAULT_SHORTCUTS, validateShortcuts, ENGINES, webURL, navigate, exactOrigin, originAllowed, id, now, text, secret, stamp, initialLibrary, validateLibrary, mergeLibraries, atomicWrite, loadJSON, reorder, deleteRecords, parseChromiumBookmarks, parseNetscape, netscape, parseCSV, parseArcSidebar, parsePlistXML, parseSafariBookmarks, parseFirefoxTree, sanitizeSitePermissions, sanitizeContentSettings, sanitizeZoomByOrigin, SITE_PERMISSIONS };

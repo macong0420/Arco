@@ -79,6 +79,22 @@ function matchesTracker(raw) { try { const host = new URL(raw).hostname; return 
 function error(message) { throw new Error(typeof message === 'string' ? message : '操作失败'); }
 function bounded(value, maximum = 8192) { if (typeof value !== 'string' || value.length > maximum) error('输入无效'); return value; }
 function isHTTP(value) { try { return ['http:', 'https:'].includes(new URL(value).protocol); } catch { return false; } }
+function siteOrigin(value) { try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) ? url.origin : ''; } catch { return ''; } }
+// 每站点内容设置与缩放：在文档开始加载前应用，导航到新来源时重新计算。
+function applySiteSettings(wc, raw) {
+  if (!wc || wc.isDestroyed()) return;
+  wc.setZoomFactor(Number(library.settings.zoomByOrigin?.[siteOrigin(raw)]) || 1);
+}
+function rememberZoom(raw, factor) {
+  const origin = siteOrigin(raw); if (!origin) return;
+  try {
+    library.updateSettings(settings => {
+      const map = { ...(settings.zoomByOrigin || {}) };
+      if (!factor || factor === 1) delete map[origin]; else map[origin] = factor;
+      settings.zoomByOrigin = core.sanitizeZoomByOrigin(map);
+    });
+  } catch (cause) { console.error('无法保存缩放:', cause.message); }
+}
 const downloadsFile = path.join(userData, 'Downloads.json');
 function downloadDirectory() {
   // 测试进程不能写真实“下载”目录；临时构建落在自己的数据目录。
@@ -112,7 +128,23 @@ function persistDownloads() {
   try { core.atomicWrite(downloadsFile, [...downloads.values()].filter(record => !record.private && ['completed', 'cancelled', 'interrupted'].includes(record.state)).slice(-100).map(({ item, ...record }) => record)); }
   catch (cause) { console.error('无法保存下载记录:', cause.message); }
 }
-function sendState(win) { if (!win || win.isDestroyed() || win.shell.webContents.isDestroyed()) return; layout(win); win.shell.webContents.send('arco:state', serialize(win)); }
+// 页面加载期间会连续触发多次状态更新：这类事件合并到 50ms 一次；用户操作仍然立即推送。
+const stateTimers = new Map();
+function flushState(win) {
+  stateTimers.delete(win);
+  if (!win || win.isDestroyed() || win.shell.webContents.isDestroyed()) return;
+  layout(win);
+  win.shell.webContents.send('arco:state', serialize(win));
+}
+function sendState(win) {
+  const timer = stateTimers.get(win);
+  if (timer) { clearTimeout(timer); stateTimers.delete(win); }
+  flushState(win);
+}
+function scheduleState(win) {
+  if (!win || win.isDestroyed() || win.shell.webContents.isDestroyed() || stateTimers.has(win)) return;
+  stateTimers.set(win, setTimeout(() => flushState(win), 50));
+}
 function clearCapture(win, capture) { if (capture && win.capture === capture) win.capture = null; }
 function cancelTranslationRequests(wc) {
   for (const [id, request] of translationRequests) {
@@ -180,7 +212,7 @@ function serialize(win) {
     allBookmarks: library.data.spaces.flatMap(s => s.bookmarks.map(b => ({ ...b, spaceID: s.id }))),
     settings: { ...library.settings, dataDirectory: userData }, downloads: [...downloads.values()].filter(d => d.private ? d.windowID === win.id : !win.private).map(({ item, ...record }) => record), warning: library.warning,
     capture: win.capture ? { tabID: win.capture.tabID, origin: win.capture.origin, username: win.capture.username } : null, little: !!win.little, translation: win.tabs.get(win.activeID)?.translation || null, peek: win.peek ? { url: win.peekURL, title: win.peek.webContents.getTitle(), loading: !win.peek.webContents.isDestroyed() && win.peek.webContents.isLoading() } : null,
-    snapshots: win.snapshots || [], vault: vault.status(), passwordSyncUnlocked: passwordSync.unlocked, sidebarVisible: win.sidebarVisible, reader: win.reader, syncAvailable: false, testMode,
+    libraryUpdatedAt: library.data.updatedAt, snapshotKey: win.snapshotKey || '', vault: vault.status(), passwordSyncUnlocked: passwordSync.unlocked, sidebarVisible: win.sidebarVisible, reader: win.reader, syncAvailable: false, testMode,
     passkeys: [...passkeyRequests.values()].filter(request => request.win === win && !request.wc.isDestroyed()).map(({ id, origin }) => ({ id, origin })),
     focusedPaneID: win.focusedPaneID, find: win.find ? { query: win.find.query, targetID: win.find.targetID, targetKind: win.find.targetKind, matches: win.find.matches, active: win.find.active } : null, httpAuth: win.httpAuth ? publicAuth(win.httpAuth) : null,
     passkeysPlatform: platformPasskeysAvailable
@@ -193,7 +225,25 @@ function loadSession() {
     return value;
   });
 }
-function saveSession() {
+// 导航和切换标签会连续触发保存：内存立即更新，磁盘写入合并成一次；退出/关窗时 flush。
+function deferredWrite(write, delay) {
+  let timer = null;
+  const run = () => { timer = null; try { write(); } catch (cause) { console.error('保存失败:', cause.message); } };
+  return {
+    schedule() { if (!timer) timer = setTimeout(run, delay); },
+    flush() { if (timer) { clearTimeout(timer); run(); } }
+  };
+}
+// 历史文件按需读取：启动时不必同步解析可能上万个条目。
+let historyLoaded = false;
+function ensureHistory() {
+  if (!historyLoaded) {
+    historyLoaded = true;
+    library.history = core.loadJSON(library.historyFile, [], x => Array.isArray(x) ? x : (() => { throw new Error('历史格式不正确'); })()).data;
+  }
+  return library.history;
+}
+function writeSession() {
   if (!library || !sessionReady) return;
   const normalWindows = [...windows].filter(w => !w.private && !w.little && !w.isDestroyed());
   const normal = normalWindows.find(w => w.isFocused()) || normalWindows[0];
@@ -201,11 +251,15 @@ function saveSession() {
   const data = { version: 1, tabs, activeSpaceID: normal?.spaceID || library.savedSession?.activeSpaceID, activeID: normal?.activeID || library.savedSession?.activeID, closed: closedTabs.slice(-30), activeBySpace: normal ? Object.fromEntries(normal.lastActive) : library.savedSession?.activeBySpace || {} };
   core.atomicWrite(library.sessionFile, data); library.savedSession = data;
 }
+const sessionWriter = deferredWrite(writeSession, 300);
+const historyWriter = deferredWrite(() => { if (library) core.atomicWrite(library.historyFile, library.history); }, 500);
+function saveSession() { sessionWriter.schedule(); }
+function flushSession() { sessionWriter.flush(); }
 function recordHistory(tab) {
   if (tab.window.private || tab.window.little || !isHTTP(tab.url)) return;
   const entry = { id: core.id(), url: tab.url, title: tab.title, visitedAt: core.now() };
-  library.history = [entry, ...(library.history || []).filter(x => x.url !== entry.url)].slice(0, 10000);
-  core.atomicWrite(library.historyFile, library.history);
+  library.history = [entry, ...ensureHistory().filter(x => x.url !== entry.url)].slice(0, 10000);
+  historyWriter.schedule();
 }
 function setBounds(view, bounds) { view.setBounds(Object.fromEntries(Object.entries(bounds).map(([key, value]) => [key, Math.max(0, Math.round(value))]))); }
 function closeDockedDevTools(win, wc = null) {
@@ -267,27 +321,36 @@ function littleWindowOptions(owner) {
 function createWindow(isPrivate = false, url = '', { little = false, owner = null } = {}) {
   const options = little ? littleWindowOptions(owner) : { width: 1280, height: 820, minWidth: 760, minHeight: 500, title: isPrivate ? 'Arco · 无痕窗口' : 'Arco', titleBarStyle: 'hidden', trafficLightPosition: { x: 12, y: 12 }, backgroundColor: '#dce7f7' };
   const win = new BaseWindow(options);
-  Object.assign(win, { tabs: new Map(), activeID: null, splitID: null, extensionPanel: null, splitRatio: 0.5, focusedPaneID: null, peekFocused: false, find: null, httpAuth: null, httpAuthQueue: [], spaceID: library.data.spaces[0].id, private: isPrivate, little, sidebarVisible: !little, sidebarWidth: library.settings.sidebarWidth, capture: null, peek: null, peekURL: '', peekListeners: null, reader: false, readerView: null, overlay: '', snapshots: [], lastActive: new Map(), partition: isPrivate ? 'arco-private-' + core.id() : normalSession });
+  Object.assign(win, { tabs: new Map(), activeID: null, splitID: null, extensionPanel: null, splitRatio: 0.5, focusedPaneID: null, peekFocused: false, find: null, httpAuth: null, httpAuthQueue: [], spaceID: library.data.spaces[0].id, private: isPrivate, little, sidebarVisible: !little, sidebarWidth: library.settings.sidebarWidth, capture: null, peek: null, peekURL: '', peekListeners: null, reader: false, readerView: null, overlay: '', snapshotKey: '', lastActive: new Map(), partition: isPrivate ? 'arco-private-' + core.id() : normalSession });
   if (isPrivate) setupSession(session.fromPartition(win.partition));
   if (!isPrivate && !little) {
     sessionReady = false;
     const loaded = loadSession();
-    const history = core.loadJSON(library.historyFile, [], x => Array.isArray(x) ? x : (() => { throw new Error('历史格式不正确'); })());
-    library.history ||= history.data; library.savedSession = loaded.data;
+    // 每次打开普通窗口都重新读取历史：损坏文件要在这里报错并停止写入，不能沿用内存里的旧副本。
+    const stored = core.loadJSON(library.historyFile, [], x => Array.isArray(x) ? x : (() => { throw new Error('历史格式不正确'); })());
+    library.history ||= stored.data; historyLoaded = true;
+    library.savedSession = loaded.data;
     win.spaceID = library.space(loaded.data.activeSpaceID)?.id || library.data.spaces[0].id; win.lastActive = new Map(Object.entries(loaded.data.activeBySpace || {}));
     for (const closed of loaded.data.closed || []) if (closed?.url && !closedTabs.some(x => x.url === closed.url)) closedTabs.push(closed);
     sessionReady = true;
   }
   win.shell = new WebContentsView({ webPreferences: { preload: extensionHost.shellPreload, contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } });
   win.contentView.addChildView(win.shell); win.shell.setBackgroundColor('#00000000');
+  // 外壳页面被销毁（渲染进程崩溃、或外部关闭了外壳）时，窗口不能只剩一个孤儿网页视图卡住退出。
+  // 外壳页面被外部关闭或销毁（例如渲染进程崩溃）时，窗口不能只剩一个孤儿网页视图卡住退出。
+  // 先在外壳还活着时关闭窗口；关闭事件可能重入，用标记挡住。
+  let shellClosing = false;
+  const closeWithShell = () => { if (shellClosing || win.isDestroyed()) return; shellClosing = true; win.close(); };
+  win.shell.webContents.once('close', closeWithShell);
+  win.shell.webContents.once('destroyed', closeWithShell);
   win.shell.webContents.loadFile(path.join(__dirname, 'shell.html'));
   // 界面脚本加载完成前发出的状态会丢失，首次渲染会停在空白侧栏，所以加载后再推一次。
   win.shell.webContents.once('did-finish-load', () => sendState(win));
   win.shell.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.shell.webContents.on('will-navigate', event => event.preventDefault());
   win.shell.webContents.on('before-input-event', (event, input) => { if (pageShortcut(win, input)) event.preventDefault(); });
-  win.on('resize', () => layout(win)); win.on('closed', () => { if (win.extensionPanel && !win.extensionPanel.view.webContents.isDestroyed()) win.extensionPanel.view.webContents.close(); closeDockedDevTools(win); cancelAuthForWindow(win); clearPasskeyRequests(null, win); for (const tab of win.tabs.values()) if (tab.view && !tab.view.webContents.isDestroyed()) tab.view.webContents.close(); if (win.readerView && !win.readerView.webContents.isDestroyed()) win.readerView.webContents.close(); win.peek?.webContents.close(); if (!win.shell.webContents.isDestroyed()) win.shell.webContents.close(); for (const [id, owner] of popupOwners) if (owner.window === win) popupOwners.delete(id); for (const [id, d] of downloads) if (d.private && d.windowID === win.id) downloads.delete(id); windows.delete(win); });
-  win.on('close', () => { if (!win.private && !win.little) saveSession(); });
+  win.on('resize', () => layout(win)); win.on('closed', () => { const timer = stateTimers.get(win); if (timer) clearTimeout(timer); stateTimers.delete(win); if (win.extensionPanel && !win.extensionPanel.view.webContents.isDestroyed()) win.extensionPanel.view.webContents.close(); closeDockedDevTools(win); cancelAuthForWindow(win); clearPasskeyRequests(null, win); for (const tab of win.tabs.values()) if (tab.view && !tab.view.webContents.isDestroyed()) tab.view.webContents.close(); if (win.readerView && !win.readerView.webContents.isDestroyed()) win.readerView.webContents.close(); win.peek?.webContents.close(); if (!win.shell.webContents.isDestroyed()) win.shell.webContents.close(); for (const [id, owner] of popupOwners) if (owner.window === win) popupOwners.delete(id); for (const [id, d] of downloads) if (d.private && d.windowID === win.id) downloads.delete(id); windows.delete(win); });
+  win.on('close', () => { if (!win.private && !win.little) { flushSession(); historyWriter.flush(); } });
   windows.add(win); layout(win);
   if (isPrivate || little) createTab(win, url, { select: true });
   else {
@@ -301,12 +364,12 @@ function createWindow(isPrivate = false, url = '', { little = false, owner = nul
 // 标签页的渲染进程按需创建：恢复的标签页先只有记录，第一次显示时才创建 WebContentsView。
 function mountTab(win, tab, extensionID = '') {
   const view = new WebContentsView({ webPreferences: { partition: win.partition, preload: path.join(__dirname, 'page-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, safeDialogs: true } });
-  tab.view = view; attachTab(tab, extensionID);
+  tab.view = view; applySiteSettings(view.webContents, tab.url); attachTab(tab, extensionID);
   if (!win.private) extensionHost.track(view.webContents, win);
   if (tab.url) view.webContents.loadURL(tab.url).catch(() => {});
   return view;
 }
-function wakeTab(win, tab) { return tab.view || mountTab(win, tab); }
+function wakeTab(win, tab) { tab.lastUsed = Date.now(); return tab.view || mountTab(win, tab); }
 function createTab(win, rawURL, options = {}) {
   if (!win || win.isDestroyed() || (!win.private && !library.space(options.spaceID || win.spaceID))) error('空间不存在');
   const url = rawURL && rawURL !== 'about:blank' ? (options.extensionPage ? extensionHost.url(rawURL, options.extensionID) : core.webURL(rawURL)) : '';
@@ -314,7 +377,7 @@ function createTab(win, rawURL, options = {}) {
   // Adopt Chromium's child WebContents so window.open keeps its opener, WindowProxy and POST body.
   // An existing WebContentsView is used only when Peek is promoted; it is transferred without another navigation.
   const view = options.view || (options.webContents ? new WebContentsView({ webContents: options.webContents }) : null);
-  const tab = { id, spaceID, url, title: options.title || (url ? new URL(url).hostname : '新标签页'), favicon: '', pinned: !!options.pinned, view, window: win, generation: 0 };
+  const tab = { id, spaceID, url, title: options.title || (url ? new URL(url).hostname : '新标签页'), favicon: '', pinned: !!options.pinned, view, window: win, generation: 0, lastUsed: Date.now() };
   win.tabs.set(id, tab);
   if (view) {
     attachTab(tab, options.extensionID || '');
@@ -444,6 +507,7 @@ function attachTab(tab, initialExtensionID = '') {
   });
   wc.on('did-start-navigation', (event, url, isInPlace, isMainFrame) => {
     if (!isMainFrame || isInPlace) return;
+    applySiteSettings(wc, url);
     if (tab.pendingLittleLink) return;
     tab.url = url; tab.generation = (tab.generation || 0) + 1;
     tab.translation = null;
@@ -451,12 +515,12 @@ function attachTab(tab, initialExtensionID = '') {
     if (win.reader && win.readerSource?.tabID === tab.id) closeReader(win, false);
     sendState(win);
   });
-  wc.on('did-navigate', (_, url) => { tab.loadFailed = false; tab.loadError = ''; tab.url = url; sendState(win); if (!win.little) saveSession(); });
-  wc.on('did-navigate-in-page', (_, url, isMainFrame) => { if (isMainFrame) { tab.url = url; recordHistory(tab); offerStoreInstall(tab); sendState(win); if (!win.little) saveSession(); } });
-  wc.on('page-title-updated', (event, title) => { event.preventDefault(); tab.title = title.slice(0, 1000) || '新标签页'; sendState(win); });
-  wc.on('page-favicon-updated', (_, icons) => { tab.favicon = icons[0] || ''; if (!win.private && tab.favicon) adoptFavoriteIcon(tab); sendState(win); });
-  wc.on('did-finish-load', () => { tab.url = wc.getURL(); recordHistory(tab); offerStoreInstall(tab); sendState(win); });
-  wc.on('did-start-loading', () => sendState(win)); wc.on('did-stop-loading', () => sendState(win));
+  wc.on('did-navigate', (_, url) => { applySiteSettings(wc, url); tab.loadFailed = false; tab.loadError = ''; tab.url = url; scheduleState(win); if (!win.little) saveSession(); });
+  wc.on('did-navigate-in-page', (_, url, isMainFrame) => { if (isMainFrame) { tab.url = url; recordHistory(tab); offerStoreInstall(tab); scheduleState(win); if (!win.little) saveSession(); } });
+  wc.on('page-title-updated', (event, title) => { event.preventDefault(); tab.title = title.slice(0, 1000) || '新标签页'; scheduleState(win); });
+  wc.on('page-favicon-updated', (_, icons) => { tab.favicon = icons[0] || ''; if (!win.private && tab.favicon) adoptFavoriteIcon(tab); scheduleState(win); });
+  wc.on('did-finish-load', () => { tab.url = wc.getURL(); applySiteSettings(wc, tab.url); recordHistory(tab); offerStoreInstall(tab); scheduleState(win); });
+  wc.on('did-start-loading', () => scheduleState(win)); wc.on('did-stop-loading', () => scheduleState(win));
   wc.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
     if (!isMainFrame || code === -3) return; // Downloads and superseded navigations normally abort.
     // 失败后 wc.getURL() 还停在 about:blank，必须用失败的目标地址，否则地址栏和错误页都会丢掉用户输入的网址。
@@ -464,7 +528,7 @@ function attachTab(tab, initialExtensionID = '') {
     tab.loadFailed = true; tab.loadError = description || ''; tab.url = url || wc.getURL() || tab.url; tab.title = wc.getTitle() || tab.title; sendState(win);
     if (visible) win.shell.webContents.send('arco:command', 'navigation-failed');
   });
-  wc.on('audio-state-changed', () => sendState(win));
+  wc.on('audio-state-changed', () => scheduleState(win));
   wc.on('ipc-message', (event, channel, payload) => {
     if (event.senderFrame !== wc.mainFrame || !win.tabs.has(tab.id)) return;
     if (channel === 'arco:page-link') { if (!win.little && library.settings.linkOpenMode === 'little' && typeof payload?.url === 'string' && isHTTP(payload.url)) tab.pendingLittleLink = { url: payload.url, generation: tab.generation }; return; }
@@ -701,6 +765,20 @@ async function approveExtension(win, asked, local = false) {
   const answer = await dialog.showMessageBox(win, { type: 'question', buttons: ['取消', '添加扩展程序'], defaultId: 1, cancelId: 0, message: `添加“${asked.name}”？`, detail: details.slice(0, 2000) });
   return answer.response === 1;
 }
+async function updateExtensions() {
+  const results = await library.checkExtensionUpdates();
+  if (results.some(item => item.to)) broadcast();
+  return results;
+}
+async function backgroundExtensionUpdates() {
+  try {
+    const results = await updateExtensions();
+    const message = results.filter(item => item.to).map(item => `已更新 ${item.name}`).concat(results.filter(item => item.skipped).map(item => `${item.name}：${item.skipped}`), results.filter(item => item.error).map(item => `${item.name} 更新失败：${item.error}`)).join('；');
+    if (!message) return;
+    const win = [...windows].find(w => !w.private && !w.little && !w.isDestroyed());
+    if (win && !win.shell.webContents.isDestroyed()) win.shell.webContents.send('arco:command', { command: 'toast', message });
+  } catch (cause) { console.error('扩展更新检查失败:', cause.message); }
+}
 async function installFromStore(win, input) {
   if (win.private) error('无痕窗口不能安装扩展');
   reportInstall(win, 'progress', '正在下载并校验扩展…');
@@ -727,7 +805,7 @@ function selectTab(win, tabID) {
   if (previous && previous !== tab && previous.view && !previous.view.webContents.isDestroyed()) { previous.view.webContents.closeDevTools(); closeDockedDevTools(win, previous.view.webContents); }
   resetFind(win, false); closePeek(win); closeReader(win, false);
   for (const other of win.tabs.values()) removePageView(win, other);
-  win.activeID = tabID; win.focusedPaneID = tabID; win.peekFocused = false; win.spaceID = tab.spaceID; win.lastActive.set(tab.spaceID,tabID); win.splitID = null;
+  win.activeID = tabID; win.focusedPaneID = tabID; win.peekFocused = false; win.spaceID = tab.spaceID; win.lastActive.set(tab.spaceID,tabID); win.splitID = null; tab.lastUsed = Date.now();
   if (!tab.view) wakeTab(win, tab);
   addPageView(win, tab, true); if (!win.private) extensionHost.select(tab.view.webContents); layout(win); sendState(win); if (!win.little) saveSession();
   if (!win.overlay) (tab.url ? tab.view.webContents : win.shell.webContents).focus();
@@ -762,6 +840,29 @@ function closeTab(win, tabID) {
   else if (!win.focusedPaneID) win.focusedPaneID = win.activeID;
   sendState(win); if (!win.little) saveSession();
 }
+// 后台标签休眠：释放闲置标签的渲染进程，切回来时按最后的网址重新加载。
+function sleepIdleTabs(minutes = Number(library.settings.tabSleepMinutes) || 0) {
+  if (!(minutes > 0)) return 0;
+  const cutoff = Date.now() - minutes * 60000;
+  let slept = 0;
+  for (const win of windows) {
+    if (win.isDestroyed() || win.little) continue;
+    for (const tab of win.tabs.values()) {
+      if (!tab.view || !tab.url || tab.pinned || tab.id === win.activeID || tab.id === win.splitID) continue;
+      if ((tab.lastUsed || 0) > cutoff) continue;
+      const wc = tab.view.webContents;
+      if (wc.isDestroyed() || wc.isLoading() || wc.isCurrentlyAudible()) continue;
+      if (win.find?.wc === wc || win.devtoolsTarget === wc || win.capture?.tabID === tab.id) continue;
+      if (win.httpAuthQueue.some(request => request.wc === wc)) continue;
+      if ([...passkeyRequests.values()].some(request => request.wc === wc)) continue;
+      // 休眠是丢弃页面，不允许 beforeunload 把标签留在内存里。
+      wc.once('will-prevent-unload', event => event.preventDefault());
+      removePageView(win, tab); wc.close(); tab.view = null; tab.translation = null; slept++;
+    }
+  }
+  if (slept) broadcast();
+  return slept;
+}
 function reopenTab(win) { const closed = closedTabs.pop(); if (closed) createTab(win, closed.url, { spaceID: library.space(closed.spaceID)?.id || win.spaceID, title: closed.title, select: true }); }
 function toggleSplit(win, tabID) {
   resetFind(win, false);
@@ -777,16 +878,16 @@ function openPeek(win, rawURL) {
   const url = core.webURL(rawURL); closePeek(win); resetFind(win, false);
   win.peek = new WebContentsView({ webPreferences: { partition: win.partition, preload: path.join(__dirname, 'page-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, safeDialogs: true } });
   win.contentView.addChildView(win.peek); win.peek.setBorderRadius(14); win.peek.setBackgroundColor('#ffffffff'); win.peekURL = url; win.peekFocused = true;
-  const wc = win.peek.webContents;
-  const updateURL = next => { win.peekURL = next; sendState(win); };
+  const wc = win.peek.webContents; applySiteSettings(wc, url);
+  const updateURL = next => { win.peekURL = next; scheduleState(win); };
   const listeners = {
     'before-input-event': (event, input) => { if (input.type === 'keyDown' && input.key === 'Escape') { event.preventDefault(); closePeek(win); } else if (pageShortcut(win, input)) event.preventDefault(); },
     'will-navigate': (event, next) => { if (!isHTTP(next)) event.preventDefault(); },
-    'did-start-loading': () => sendState(win),
-    'did-stop-loading': () => sendState(win),
-    'did-navigate': (_, next) => updateURL(next),
+    'did-start-loading': () => scheduleState(win),
+    'did-stop-loading': () => scheduleState(win),
+    'did-navigate': (_, next) => { applySiteSettings(wc, next); updateURL(next); },
     'did-navigate-in-page': (_, next, isMainFrame) => { if (isMainFrame) updateURL(next); },
-    'page-title-updated': event => { event.preventDefault(); sendState(win); },
+    'page-title-updated': event => { event.preventDefault(); scheduleState(win); },
     'found-in-page': (_, result) => noteFindResult(win, wc, result),
     focus: () => {
       if (win.isDestroyed() || win.peek?.webContents !== wc) return;
@@ -913,25 +1014,58 @@ function handleLogin(event, wc, details, authInfo, callback) {
   } catch { return callback(); }
   queueAuthRequest(win, wc, { origin, host: String(authInfo.host || '').slice(0, 255), port: Number(authInfo.port) || 0, realm: String(authInfo.realm || '').slice(0, 500), proxy: !!authInfo.isProxy, retry: details.firstAuthAttempt === false }, callback);
 }
-function setupSession(ses) {
+// 普通会话记住用户的选择；无痕会话只在本次运行内有效。
+function setSitePermission(origin, permission, decision) {
+  library.updateSettings(settings => {
+    const map = { ...(settings.sitePermissions || {}) };
+    map[origin] = { ...(map[origin] || {}), [permission]: decision };
+    settings.sitePermissions = core.sanitizeSitePermissions(map);
+  });
+}
+// 每个会话的内存授权（本次运行有效）；清除网站权限时要同时清掉，否则站点在重启前仍然被放行。
+const sessionGrants = new Map();
+function setupSession(ses, persist = false) {
   ses.registerPreloadScript({ type: 'frame', filePath: path.join(__dirname, 'gesture-preload.js') });
   const grants = new Set();
+  sessionGrants.set(ses, grants);
   const testGrants = testMode && process.env.ARCO_TEST_PERMISSION_GRANTS ? JSON.parse(process.env.ARCO_TEST_PERMISSION_GRANTS) : [];
+  const stored = (origin, permission) => persist ? library.settings.sitePermissions?.[origin]?.[permission] || '' : '';
+  const remember = (origin, permission, decision) => {
+    if (!persist) return;
+    try { setSitePermission(origin, permission, decision); }
+    catch (cause) { console.error('无法保存网站权限:', cause.message); }
+  };
   ses.setPermissionRequestHandler((wc, permission, callback, details) => {
     const win = ownerForWebContents(wc);
     let origin; try { origin = core.exactOrigin(details.requestingUrl); } catch { return callback(false); }
     if (!win || origin !== new URL(wc.getURL()).origin || !['media', 'geolocation', 'notifications', 'clipboard-read', 'clipboard-sanitized-write'].includes(permission)) return callback(false);
+    const decision = stored(origin, permission);
+    if (decision === 'allow') return callback(true);
+    if (decision === 'deny') return callback(false);
     const key = origin + '|' + permission;
     if (grants.has(key)) return callback(true);
     const testGrant = Array.isArray(testGrants) && testGrants.find(grant => grant?.origin === origin && grant?.permission === permission);
     if (testGrant) { if (testGrant.allow === true) grants.add(key); return callback(testGrant.allow === true); }
     const names = { media: '相机或麦克风', geolocation: '位置', notifications: '通知', 'clipboard-read': '读取剪贴板', 'clipboard-sanitized-write': '写入剪贴板' };
-    const choice = dialog.showMessageBoxSync(win, { type: 'question', buttons: ['拒绝', '本次会话允许'], defaultId: 0, cancelId: 0, message: '允许 ' + origin + ' 使用' + names[permission] + '？' });
-    if (choice === 1) grants.add(key); callback(choice === 1);
+    const choice = dialog.showMessageBoxSync(win, { type: 'question', buttons: ['拒绝', persist ? '允许' : '本次会话允许'], defaultId: 0, cancelId: 0, message: '允许 ' + origin + ' 使用' + names[permission] + '？' + (persist ? '\n这个选择会被记住，可在设置 → 隐私与安全中清除。' : '') });
+    if (choice === 1) grants.add(key);
+    remember(origin, permission, choice === 1 ? 'allow' : 'deny');
+    callback(choice === 1);
   });
-  ses.setPermissionCheckHandler((wc, permission, origin) => { try { return !!wc && !!ownerForWebContents(wc) && grants.has(new URL(origin).origin + '|' + permission); } catch { return false; } });
+  ses.setPermissionCheckHandler((wc, permission, origin) => {
+    try {
+      if (!wc || !ownerForWebContents(wc)) return false;
+      const normalized = new URL(origin).origin, key = normalized + '|' + permission;
+      return grants.has(key) || stored(normalized, permission) === 'allow';
+    } catch { return false; }
+  });
   ses.webRequest.onBeforeRequest((details, callback) => {
     if (library.settings.trackerBlocking && details.resourceType !== 'mainFrame' && matchesTracker(details.url)) { trackerCount++; return callback({ cancel: true }); }
+    // 站点级图片开关按发起页面判断；关闭后该站点的图片请求直接取消。
+    if (details.resourceType === 'image') {
+      const origin = siteOrigin(details.initiator || details.referrer);
+      if (origin && library.settings.contentSettings?.[origin]?.images === false) return callback({ cancel: true });
+    }
     callback({});
   });
   ses.on('will-download', (_, item, wc) => {
@@ -941,7 +1075,10 @@ function setupSession(ses) {
     downloads.set(record.id, record);
     item.on('updated', (_, state) => {
       if (!downloads.has(record.id) || record.failure) return;
-      record.received = item.getReceivedBytes(); record.total = item.getTotalBytes(); record.state = item.isPaused() ? 'paused' : state; record.path = item.getSavePath(); broadcast(); dockProgress();
+      record.received = item.getReceivedBytes(); record.total = item.getTotalBytes(); record.state = item.isPaused() ? 'paused' : state; record.path = item.getSavePath();
+      // 进度事件很密：界面 250ms 更新一次就够了，终态再立即广播。
+      const now = Date.now();
+      if (now - (record.reportedAt || 0) >= 250) { record.reportedAt = now; broadcast(); dockProgress(); }
     });
     // 终态监听在设置保存位置之前注册：初始化失败也必须走到确定的终态清理。
     item.once('done', (_, state) => {
@@ -949,21 +1086,28 @@ function setupSession(ses) {
       if (!record.failure) record.state = state;
       record.item = null; record.path = item.getSavePath(); releaseDownloadPath(record.path);
       persistDownloads(); broadcast(); dockProgress();
+      if (state === 'completed' && library.settings.openDownloadedFiles && record.path) shell.openPath(record.path).catch(() => {});
     });
-    // 明确指定保存位置：不弹出阻塞式系统对话框，也不覆盖已有文件。
+    // 默认直接保存到“下载”目录且不覆盖同名文件；设置里可改为每次询问保存位置。
     const folder = downloadDirectory();
-    let savePath = '';
-    try {
-      savePath = uniqueDownloadPath(folder, record.filename);
-      // 保存位置必须留在下载目录内；越界路径直接拒绝。
-      if (path.resolve(savePath) !== savePath || !path.resolve(savePath).startsWith(path.resolve(folder) + path.sep)) throw new Error('下载路径无效');
-      item.setSavePath(savePath);
+    if (library.settings.askDownloadPath) {
+      try { fs.mkdirSync(folder, { recursive: true, mode: 0o700 }); } catch {}
+      item.setSaveDialogOptions({ title: '保存文件', defaultPath: path.join(folder, record.filename) });
       record.path = item.getSavePath();
-    } catch {
-      // 目录创建/同名序号耗尽/setSavePath 失败：释放已预留的名字，丢掉失效 DownloadItem，广播真实失败状态。
-      releaseDownloadPath(savePath);
-      record.failure = true; record.state = 'interrupted'; record.item = null; record.path = '';
-      item.cancel(); persistDownloads(); broadcast(); return;
+    } else {
+      let savePath = '';
+      try {
+        savePath = uniqueDownloadPath(folder, record.filename);
+        // 保存位置必须留在下载目录内；越界路径直接拒绝。
+        if (path.resolve(savePath) !== savePath || !path.resolve(savePath).startsWith(path.resolve(folder) + path.sep)) throw new Error('下载路径无效');
+        item.setSavePath(savePath);
+        record.path = item.getSavePath();
+      } catch {
+        // 目录创建/同名序号耗尽/setSavePath 失败：释放已预留的名字，丢掉失效 DownloadItem，广播真实失败状态。
+        releaseDownloadPath(savePath);
+        record.failure = true; record.state = 'interrupted'; record.item = null; record.path = '';
+        item.cancel(); persistDownloads(); broadcast(); return;
+      }
     }
     broadcast();
   });
@@ -1033,7 +1177,7 @@ function adoptFavoriteIcon(tab) {
   iconAttempts.add(favorite.id);
   cacheFavoriteIcon({ ...favorite, favicon: tab.favicon }).catch(() => {});
 }
-const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'refresh-favorite-icon', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'migrate-browser-data', 'import-browser', 'chrome-extensions', 'import-chrome-extensions', 'install-extension-store', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'history-search', 'history-delete', 'little-window', 'little-promote', 'little-close', 'translate', 'history-clear', 'save-page', 'clear-site-data', 'default-browser', 'download-open', 'download-reveal', 'download-cancel', 'download-pause', 'download-resume', 'find', 'find-stop', 'passkey-cancel', 'http-auth-submit', 'http-auth-cancel', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'open-system-passwords', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'install-local-crx', 'remove-extension', 'extension-list', 'extension-toggle', 'extension-popup', 'copy', 'menu', 'confirm-clear']);
+const CHANNELS = new Set(['open-url', 'overlay', 'password-sync-unlock', 'password-sync-lock', 'password-sync-now', 'move-bookmark', 'tab-action', 'item-menu', 'vault-status', 'navigate', 'new-tab', 'close-tab', 'select-tab', 'switch-space', 'back', 'forward', 'reload', 'stop', 'reopen-tab', 'clear-tabs', 'toggle-split', 'split-ratio', 'peek', 'close-peek', 'peek-to-tab', 'toggle-sidebar', 'sidebar-width', 'add-space', 'update-space', 'remove-space', 'add-bookmark', 'refresh-favorite-icon', 'update-bookmark', 'delete-bookmark', 'add-favorite', 'add-folder', 'update-folder', 'delete-folder', 'import-bookmarks', 'browser-sources', 'migrate-browser-data', 'import-browser', 'chrome-extensions', 'import-chrome-extensions', 'install-extension-store', 'check-extension-updates', 'finish-onboarding', 'export-bookmarks', 'connect-sync', 'disconnect-sync', 'sync-now', 'update-settings', 'clear-site-permissions', 'update-content-setting', 'clear-content-settings', 'history-search', 'history-delete', 'little-window', 'little-promote', 'little-close', 'translate', 'history-clear', 'save-page', 'clear-site-data', 'clear-all-site-data', 'default-browser', 'download-open', 'download-reveal', 'download-save-as', 'download-cancel', 'download-pause', 'download-resume', 'find', 'find-stop', 'passkey-cancel', 'http-auth-submit', 'http-auth-cancel', 'zoom', 'print', 'pdf', 'devtools', 'screenshot', 'reader', 'private-window', 'open-system-passwords', 'credentials', 'credential-save', 'credential-read', 'credential-delete', 'credential-fill', 'capture-save', 'capture-dismiss', 'generate-password', 'import-passwords', 'export-passwords', 'add-extension', 'install-local-crx', 'remove-extension', 'extension-list', 'extension-toggle', 'extension-popup', 'copy', 'menu', 'confirm-clear']);
 function trustedWindow(event) {
   const win = [...windows].find(w => w.shell.webContents === event.sender);
   if (!win || event.senderFrame !== win.shell.webContents.mainFrame || event.senderFrame.url !== pathToFileURL(path.join(__dirname, 'shell.html')).href) error('未授权的界面请求');
@@ -1050,17 +1194,28 @@ ipcMain.handle('arco:invoke', async (event, message) => {
         const generation = (win.overlayGeneration || 0) + 1; win.overlayGeneration = generation; const snapshots = [];
         // 背景快照只是装饰：等待渲染的页面（例如 401 首帧）不能拖住弹层交互，最多等 400ms。
         if (kind && kind !== 'find' && !win.overlay) {
-          const capture = (async () => { for (const tab of win.tabs.values()) if (tab.view?.getVisible()) { try { const image = await tab.view.webContents.capturePage(); snapshots.push({ url: image.toDataURL(), bounds: tab.view.getBounds() }); } catch { /* optional backdrop */ } } })();
+          const capture = (async () => { for (const tab of win.tabs.values()) if (tab.view?.getVisible()) { try {
+            const bounds = tab.view.getBounds(), image = await tab.view.webContents.capturePage();
+            // 背景只做暗化衬底：缩到 1x 并转 JPEG，避免把全尺寸 PNG 反复塞进状态消息。
+            const scaled = image.resize({ width: Math.max(1, Math.round(bounds.width)), height: Math.max(1, Math.round(bounds.height)), quality: 'good' });
+            snapshots.push({ url: 'data:image/jpeg;base64,' + scaled.toJPEG(72).toString('base64'), bounds });
+          } catch { /* optional backdrop */ } } })();
           await Promise.race([capture, new Promise(resolve => setTimeout(resolve, 400))]);
         }
         if (generation !== win.overlayGeneration || win.isDestroyed()) return true;
-        win.snapshots = kind ? snapshots.slice() : [];
+        win.snapshotKey = kind && snapshots.length ? core.id() : '';
+        if (win.snapshotKey) win.shell.webContents.send('arco:snapshots', { key: win.snapshotKey, snapshots });
         win.overlay = kind; layout(win); if (kind && kind !== 'capture') win.shell.webContents.focus(); break;
       }
       case 'vault-status': return vault.status();
       case 'history-search': {
         if (testMode && a.gate) await new Promise(resolve => { win.historyGate = resolve; });
-        return win.private ? [] : library.history.filter(item => !a.query || `${item.title} ${item.url}`.toLowerCase().includes(bounded(a.query, 500).toLowerCase()));
+        if (win.private) return [];
+        const query = a.query ? bounded(a.query, 500).toLowerCase() : '';
+        const items = ensureHistory();
+        const matches = query ? items.filter(item => `${item.title} ${item.url}`.toLowerCase().includes(query)) : items;
+        // 命令面板只需要最近若干条；按查询过滤时也从全量历史里取，但限制返回量。
+        return matches.slice(0, Math.min(1000, Math.max(1, Number(a.limit) || 500)));
       }
       case 'password-sync-unlock': if (win.private) error('无痕窗口不能同步密码'); passwordSync.unlock(core.secret(a.passphrase, 1024)); broadcast(); return true;
       case 'password-sync-lock': passwordSync.lock(); broadcast(); return true;
@@ -1148,16 +1303,54 @@ ipcMain.handle('arco:invoke', async (event, message) => {
           if (['system', 'light', 'dark'].includes(a.theme)) settings.theme = a.theme;
           if (['detach', 'right'].includes(a.devtoolsMode)) settings.devtoolsMode = a.devtoolsMode;
           if (['tab', 'little'].includes(a.linkOpenMode)) settings.linkOpenMode = a.linkOpenMode;
+          if ([0, 30, 60, 120, 240].includes(Number(a.tabSleepMinutes))) settings.tabSleepMinutes = Number(a.tabSleepMinutes);
           if (a.shortcuts !== undefined) settings.shortcuts = core.validateShortcuts(a.shortcuts);
           if (typeof a.frameInset === 'boolean') settings.frameInset = a.frameInset;
+          if (typeof a.askDownloadPath === 'boolean') settings.askDownloadPath = a.askDownloadPath;
+          if (typeof a.openDownloadedFiles === 'boolean') settings.openDownloadedFiles = a.openDownloadedFiles;
         });
         nativeTheme.themeSource = library.settings.theme;
         if (a.shortcuts !== undefined) installMenu();
         broadcast(); break;
       }
+      case 'clear-site-permissions': {
+        library.updateSettings(settings => {
+          if (a.origin) { const map = { ...(settings.sitePermissions || {}) }; delete map[a.origin]; settings.sitePermissions = map; }
+          else settings.sitePermissions = {};
+        });
+        for (const grants of sessionGrants.values()) {
+          if (a.origin) { for (const key of [...grants]) if (key.startsWith(a.origin + '|')) grants.delete(key); }
+          else grants.clear();
+        }
+        broadcast(); break;
+      }
+      case 'update-content-setting': {
+        const origin = siteOrigin(bounded(a.origin, 300)); if (!origin) error('网站来源无效');
+        if (a.kind !== 'images') error('内容设置无效');
+        library.updateSettings(settings => {
+          const map = { ...(settings.contentSettings || {}) }, entry = { ...(map[origin] || {}) };
+          if (a.enabled) delete entry[a.kind]; else entry[a.kind] = false;
+          if (Object.keys(entry).length) map[origin] = entry; else delete map[origin];
+          settings.contentSettings = core.sanitizeContentSettings(map);
+        });
+        for (const window of windows) for (const tab of window.tabs.values()) if (tab.view && siteOrigin(tab.url) === origin) {
+          applySiteSettings(tab.view.webContents, tab.url);
+          if (tab.id === window.activeID || tab.id === window.splitID) tab.view.webContents.reload();
+        }
+        broadcast(); break;
+      }
+      case 'clear-content-settings': {
+        const origin = a.origin ? siteOrigin(bounded(a.origin, 300)) : '';
+        library.updateSettings(settings => {
+          if (origin) { const map = { ...(settings.contentSettings || {}) }; delete map[origin]; settings.contentSettings = map; }
+          else settings.contentSettings = {};
+        });
+        for (const window of windows) for (const tab of window.tabs.values()) if (tab.view) applySiteSettings(tab.view.webContents, tab.url);
+        broadcast(); break;
+      }
       case 'history-delete': {
         if (win.private) error('无痕窗口没有历史记录');
-        const next = library.history.filter(x => x.id !== a.id);
+        const next = ensureHistory().filter(x => x.id !== a.id);
         core.atomicWrite(library.historyFile, next); library.history = next; broadcast(); break;
       }
       case 'history-clear': {
@@ -1165,11 +1358,19 @@ ipcMain.handle('arco:invoke', async (event, message) => {
         const span = { hour: 3600e3, day: 86400e3 }[a.range];
         if (!span && a.range !== 'all') error('时间范围无效');
         const cutoff = span ? new Date(Date.now() - span).toISOString() : '';
-        const next = cutoff ? library.history.filter(x => x.visitedAt < cutoff) : [];
+        const next = cutoff ? ensureHistory().filter(x => x.visitedAt < cutoff) : [];
         // 已关闭标签页没有时间戳；一并清空，避免“恢复关闭的标签页”把刚清掉的网址带回来。
         core.atomicWrite(library.historyFile, next); library.history = next; closedTabs.length = 0; broadcast(); break;
       }
       case 'save-page': { const wc = commandTarget(win).wc; const result = await dialog.showSaveDialog(win, { defaultPath: (wc.getTitle() || 'Arco-Page').replace(/[\/:]/g, '-').slice(0, 100) + '.html', filters: [{ name: '网页', extensions: ['html'] }] }); if (result.filePath) await wc.savePage(result.filePath, 'HTMLComplete'); break; }
+      case 'clear-all-site-data': {
+        const accepted = await dialog.showMessageBox(win, { type: 'warning', buttons: ['取消', '清除'], defaultId: 0, cancelId: 0, message: '清除所有网站的 Cookie 和网站数据？', detail: '所有网站都会退出登录。浏览历史、书签和密码不会受影响。' });
+        if (accepted.response !== 1) return false;
+        const sessions = new Set([session.fromPartition(normalSession)]);
+        for (const window of windows) if (window.private) sessions.add(session.fromPartition(window.partition));
+        for (const ses of sessions) await ses.clearStorageData();
+        broadcast(); return true;
+      }
       case 'clear-site-data': {
         const wc = commandTarget(win).wc, url = wc.getURL();
         if (!isHTTP(url)) error('当前页面没有网站数据');
@@ -1180,6 +1381,13 @@ ipcMain.handle('arco:invoke', async (event, message) => {
       }
       case 'default-browser': if (!app.isPackaged) error('只有打包后的 Arco 才能设为默认浏览器'); app.setAsDefaultProtocolClient('http'); app.setAsDefaultProtocolClient('https'); break;
       case 'download-open': { const item = allowedDownload(win, a.id); if (item.path && item.state === 'completed') await shell.openPath(item.path); break; }
+      case 'download-save-as': {
+        const item = allowedDownload(win, a.id);
+        if (!item.path || item.state !== 'completed') error('只能另存已完成的下载');
+        const result = await dialog.showSaveDialog(win, { defaultPath: path.join(downloadDirectory(), item.filename) });
+        if (result.canceled || !result.filePath) return false;
+        await fs.promises.copyFile(item.path, result.filePath); return true;
+      }
       case 'download-reveal': { const item = allowedDownload(win, a.id); if (item.path) shell.showItemInFolder(item.path); break; }
       case 'download-cancel': { const item = allowedDownload(win, a.id); if (item.item && ['progressing', 'paused'].includes(item.state)) item.item.cancel(); break; }
       case 'download-pause': { const item = allowedDownload(win, a.id); if (item.item && item.state === 'progressing') { item.item.pause(); item.state = item.item.isPaused() ? 'paused' : item.state; broadcast(); } break; }
@@ -1206,7 +1414,7 @@ ipcMain.handle('arco:invoke', async (event, message) => {
         finishAuthRequest(request, a.username, a.password);
         if (capture?.tabID === request.tabID) clearCapture(win, capture);
         // 只移除已提交的认证表单；保存密码是独立通知，认证队列的下一项要继续显示。
-        if (!win.httpAuth) { win.overlay = ''; win.snapshots = []; layout(win); }
+        if (!win.httpAuth) { win.overlay = ''; win.snapshotKey = ''; layout(win); }
         if (!win.shell.webContents.isDestroyed()) win.shell.webContents.send('arco:command', 'auth-submitted');
         break;
       }
@@ -1214,7 +1422,12 @@ ipcMain.handle('arco:invoke', async (event, message) => {
         const request = win.httpAuthQueue.find(item => item.id === bounded(a.id, 128));
         if (request) finishAuthRequest(request); break;
       }
-      case 'zoom': { const wc = commandTarget(win).wc; if (a.reset) wc.send('arco:reset-visual-zoom'); wc.setZoomFactor(a.reset ? 1 : Math.max(0.25, Math.min(5, wc.getZoomFactor() + (Number(a.delta) || 0)))); sendState(win); break; }
+      case 'zoom': {
+        const wc = commandTarget(win).wc;
+        if (a.reset) { wc.send('arco:reset-visual-zoom'); wc.setZoomFactor(1); rememberZoom(wc.getURL(), null); }
+        else { const factor = Math.max(0.25, Math.min(5, wc.getZoomFactor() + (Number(a.delta) || 0))); wc.setZoomFactor(factor); rememberZoom(wc.getURL(), factor); }
+        sendState(win); break;
+      }
       case 'print': commandTarget(win).wc.print({}); break;
       case 'pdf': { const result = await dialog.showSaveDialog(win, { defaultPath: 'Arco-Page.pdf', filters: [{ name: 'PDF', extensions: ['pdf'] }] }); if (result.filePath) fs.writeFileSync(result.filePath, await commandTarget(win).wc.printToPDF({ printBackground: true })); break; }
       case 'devtools': toggleDevTools(win); break;
@@ -1271,6 +1484,7 @@ ipcMain.handle('arco:invoke', async (event, message) => {
       case 'extension-toggle': if (win.private) error('无痕窗口不能管理扩展'); return await library.setExtensionEnabled(bounded(a.id, 200), !!a.enabled);
       case 'extension-popup': return await openExtensionPopup(win, bounded(a.id, 200), a.anchor || {});
       case 'install-extension-store': { try { const result = await installFromStore(win, bounded(a.input, 500)); return { ...result, list: await library.extensionList() }; } catch (cause) { reportInstall(win, 'error', cause.message); throw cause; } }
+      case 'check-extension-updates': if (win.private) error('无痕窗口不能管理扩展'); return await updateExtensions();
       case 'remove-extension': if (win.private) error('无痕窗口不能管理扩展'); await library.removeExtension(bounded(a.id, 128)); break;
       case 'copy': clipboard.writeText(bounded(a.text, 1000000)); break;
       case 'menu': showAppMenu(win); break;
@@ -1591,7 +1805,7 @@ app.whenReady().then(async () => {
   };
   loadDownloadRecords();
   passwordSync = new PasswordSync(() => library.settings.syncFolder, library.settings.deviceID);
-  setupSession(session.fromPartition(normalSession));
+  setupSession(session.fromPartition(normalSession), true);
   extensionHost = createExtensionHost({
     userData, ses: session.fromPartition(normalSession),
     isShell(event) { try { return !trustedWindow(event).private; } catch { return false; } },
@@ -1625,9 +1839,12 @@ app.whenReady().then(async () => {
   await library.loadExtensions();
   if (![...windows].some(win => !win.private && !win.little)) createWindow(false);
   app.on('activate', () => { if (![...windows].some(w => !w.private && !w.little)) createWindow(false); });
+  setInterval(() => { try { sleepIdleTabs(); } catch (cause) { console.error('标签休眠失败:', cause.message); } }, 60000);
+  // 扩展更新检查放在后台，不阻塞启动；测试环境不自动联网。
+  if (!testMode) { setTimeout(backgroundExtensionUpdates, 20000); setInterval(backgroundExtensionUpdates, 6 * 3600e3); }
   launched = true; for (const url of pendingURLs.splice(0)) openExternalURL(url);
 });
-app.on('before-quit', () => { saveSession(); library?.save(); passwordSync?.lock(); translator?.dispose(); vault?.dispose(); });
+app.on('before-quit', () => { flushSession(); historyWriter.flush(); library?.save(); passwordSync?.lock(); translator?.dispose(); vault?.dispose(); });
 async function captureComposite(win) {
   const [width,height]=win.getContentSize();
   const base=(await win.shell.webContents.capturePage()).resize({width,height});
@@ -1666,6 +1883,8 @@ if (testMode) {
       if (!panel || panel.view.webContents.isDestroyed()) throw new Error('No extension panel');
       return panel.view.webContents.executeJavaScript(source, true);
     }
+    if (action === 'sleep-idle-tabs') return sleepIdleTabs(Number(payload?.minutes) || 0);
+    if (action === 'grant-site-permission') { setSitePermission(bounded(payload?.origin, 300), bounded(payload?.permission, 64), payload?.decision === 'deny' ? 'deny' : 'allow'); return true; }
     if (action === 'native-stack') return win.contentView.children.map(view => ({ url: view.webContents?.getURL() || '', visible: view.getVisible(), bounds: view.getBounds() }));
     if (action === 'state') return serialize(win);
     if (action === 'close-window') { setImmediate(()=>win.close()); return true; }

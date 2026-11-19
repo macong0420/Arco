@@ -103,6 +103,9 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     }
     if(req.url.startsWith('/peek-base'))return res.end('<title>Peek Base</title><form><input id="draft" name="draft" value=""></form>');
     if(req.url.startsWith('/peek-target'))return res.end('<title>Peek Target</title><h1>Peek target</h1>');
+    if(req.url.startsWith('/content-js'))return res.end('<title>Content Settings</title><script>fetch("/js-ran").catch(()=>{})</script><img id="content-img" src="/content-image.png">');
+    if(req.url.startsWith('/js-ran')){res.setHeader('Content-Type','text/plain');return res.end('ran');}
+    if(req.url.startsWith('/content-image.png')){res.setHeader('Content-Type','image/png');return res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==','base64'));}
     if(req.url.startsWith('/slow-page')){setTimeout(()=>res.end('<title>Slow Page</title><h1>Slow page</h1>'),700);return;}
     res.end(fixture);
   });
@@ -639,6 +642,72 @@ test('real app: Chromium, overlays, spaces, split, passwords, private isolation 
     assert.equal(await inspect('evaluate',{script:'document.cookie'},privateShell),'private=kept');
     assert.equal((await inspect('state',{},privateShell)).tabs.some(t=>t.url===origin+'/second'),false);
     await closePrivate(privateShell);
+  });
+  await t.test('remembered site permissions survive restart and skip the prompt',async()=>{
+    const localOrigin=origin.replace('127.0.0.1','localhost'),url=localOrigin+'/popup-permission';
+    await invoke('new-tab',{url});const page=await remote(url);
+    await inspect('grant-site-permission',{origin:localOrigin,permission:'notifications',decision:'allow'});
+    await page.click('#ask');
+    await assertEventually(async()=>(await page.locator('#result').textContent())==='granted');
+    assert.equal((await inspect('state')).settings.sitePermissions[localOrigin].notifications,'allow');
+    await invoke('close-tab',{id:(await inspect('state')).tabs.find(tab=>tab.url===url).id});
+    await close(); await launch();
+    await invoke('new-tab',{url});const restored=await remote(url);
+    await restored.click('#ask');
+    await assertEventually(async()=>(await restored.locator('#result').textContent())==='granted');
+    assert.equal((await inspect('state')).settings.sitePermissions[localOrigin].notifications,'allow');
+    // 设置页能看到并清除记住的权限。
+    await shell.locator('[data-action="settings"]').click();
+    await shell.locator('[data-settings-section="privacy"]').click();
+    await shell.waitForFunction(origin=>document.querySelector('#settings-panel')?.textContent.includes(origin),localOrigin);
+    await shell.click(`[data-clear-site-permission="${localOrigin}"]`);
+    await assertEventually(async()=>!((await inspect('state')).settings.sitePermissions||{})[localOrigin]);
+    await shell.keyboard.press('Escape');
+    await invoke('close-tab',{id:(await inspect('state')).tabs.find(tab=>tab.url===url).id});
+  });
+  await t.test('site content settings disable images, and zoom persists per origin',async()=>{
+    const pageURL=origin+'/content-js',imageURL=origin+'/content-image.png',pagePath='/content-js',imagePath='/content-image.png';
+    await invoke('new-tab',{url:pageURL});await remote(pageURL);
+    await assertEventually(async()=>(requestCounts.get(imagePath)||0)>=1);
+    const imagesBefore=requestCounts.get(imagePath)||0;
+    // 关闭图片：自动重载后不再请求图片。
+    await invoke('update-content-setting',{origin,kind:'images',enabled:false});
+    await assertEventually(async()=>(requestCounts.get(pagePath)||0)>=2);
+    await new Promise(resolve=>setTimeout(resolve,300));
+    assert.equal(requestCounts.get(imagePath)||0,imagesBefore,'images must not be requested when disabled');
+    // 重新打开后恢复请求。
+    await invoke('update-content-setting',{origin,kind:'images',enabled:true});
+    await assertEventually(async()=>(requestCounts.get(pagePath)||0)>=3);
+    await assertEventually(async()=>(requestCounts.get(imagePath)||0)>imagesBefore);
+    // 每站点缩放：离开再回来仍保留，还原后清除。
+    await invoke('zoom',{delta:0.5});
+    await waitState(s=>Math.abs((s.tabs.find(t=>t.url===pageURL)?.zoom||1)-1.5)<0.01);
+    await invoke('navigate',{input:origin+'/content-js?again'});
+    await waitState(s=>s.tabs.some(t=>t.url===origin+'/content-js?again'&&Math.abs((t.zoom||1)-1.5)<0.01));
+    await invoke('zoom',{reset:true});
+    await waitState(s=>Math.abs((s.tabs.find(t=>t.url===origin+'/content-js?again')?.zoom||1)-1)<0.01);
+    await invoke('clear-content-settings',{origin});
+    const tab=(await inspect('state')).tabs.find(t=>t.url===origin+'/content-js?again');
+    if(tab)await invoke('close-tab',{id:tab.id});
+  });
+  await t.test('idle background tabs sleep and wake with the configured delay',async()=>{
+    await invoke('new-tab',{url:origin+'/sleep-a'});await remote(origin+'/sleep-a');
+    await invoke('new-tab',{url:origin+'/sleep-b'});await remote(origin+'/sleep-b');
+    // 页面还在加载时不会休眠，先等两个标签都加载完成。
+    await waitState(s=>s.tabs.filter(tab=>tab.url===origin+'/sleep-a'||tab.url===origin+'/sleep-b').every(tab=>!tab.loading));
+    await new Promise(resolve=>setTimeout(resolve,80));
+    const slept=await inspect('sleep-idle-tabs',{minutes:0.0001});
+    assert.ok(slept>=1,'at least one background tab must sleep');
+    const sleptTab=(await inspect('state')).tabs.find(tab=>tab.asleep&&tab.url===origin+'/sleep-a');
+    assert.ok(sleptTab,'the older background tab must be asleep');
+    assert.equal((await inspect('views')).find(view=>view.id===sleptTab.id)?.visible,false);
+    await invoke('select-tab',{id:sleptTab.id});
+    await assertEventually(async()=>{const tab=(await inspect('state')).tabs.find(item=>item.id===sleptTab.id);return tab&&!tab.asleep;});
+    await remote(origin+'/sleep-a');
+    await invoke('update-settings',{tabSleepMinutes:30});
+    await waitState(s=>s.settings.tabSleepMinutes===30);
+    await invoke('update-settings',{tabSleepMinutes:60});
+    for(const tab of (await inspect('state')).tabs.filter(tab=>tab.url===origin+'/sleep-a'||tab.url===origin+'/sleep-b'))await invoke('close-tab',{id:tab.id});
   });
   await t.test('blank and web tabs survive actual quit and relaunch',async()=>{
     await invoke('new-tab');await shell.locator('#command-input').waitFor({state:'visible'}); await inspect('capture',{name:'new-tab'});await shell.keyboard.press('Escape');await invoke('new-tab',{url:origin+'/second'});

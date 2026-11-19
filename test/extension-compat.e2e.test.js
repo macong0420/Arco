@@ -161,3 +161,50 @@ test('the store\'s own Add to Chrome button installs through a Chrome-style conf
   assert.equal(page.url(), storeURL, 'the sentinel navigation must not leave the store page');
   await shell.waitForFunction(() => /已安装/.test(document.querySelector('#toast')?.textContent || ''));
 });
+
+test('store extensions update themselves but skip versions that ask for more permissions', { timeout: 60000 }, async t => {
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'arco-update-'));
+  const build = fs.mkdtempSync(path.join(os.tmpdir(), 'arco-update-build-'));
+  const keys = require('./crx-fixture').generateKeyPair(), storeID = keys.id;
+  const pack = (version, extra = {}) => {
+    const dir = path.join(build, 'ext-' + version);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({ manifest_version: 3, name: 'Arco Update Fixture', version, ...extra }));
+    fs.writeFileSync(path.join(dir, 'cs.js'), `document.documentElement.dataset.updateVersion='${version}';`);
+    const zip = path.join(build, `pack-${version}.zip`);
+    execFileSync('/usr/bin/zip', ['-q', '-r', zip, '.'], { cwd: dir });
+    return require('./crx-fixture').signedCRX3(fs.readFileSync(zip), keys);
+  };
+  let payload = pack('1.0.0'), latest = '1.0.0';
+  const server = http.createServer((request, response) => {
+    if (request.url.includes('response=updatecheck')) { response.setHeader('Content-Type', 'application/xml'); return response.end(`<?xml version="1.0"?><gupdate><app appid="${storeID}" status="ok"><updatecheck status="ok" version="${latest}"/></app></gupdate>`); }
+    response.writeHead(200, { 'Content-Type': 'application/x-chrome-extension' }); response.end(payload);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  let app;
+  t.after(async () => {
+    const child = app?.process(); await app?.close().catch(() => {});
+    if (child?.exitCode === null) child.kill('SIGTERM');
+    await new Promise(resolve => server.close(resolve));
+    fs.rmSync(data, { recursive: true, force: true }); fs.rmSync(build, { recursive: true, force: true });
+  });
+  app = await electron.launch({ args: [root], env: { ...process.env, ARCO_TEST_MODE: '1', ARCO_USER_DATA_DIR: data, ARCO_CRX_ORIGIN: `http://127.0.0.1:${server.address().port}` }, timeout: 15000 });
+  let shell = null;
+  for (let i = 0; i < 200 && !shell; i++) { shell = (await app.windows()).find(page => /shell\.html$/.test(page.url())); if (!shell) await new Promise(resolve => setTimeout(resolve, 50)); }
+  assert(shell); shell.setDefaultTimeout(8000);
+  await shell.waitForFunction(() => !!window.arco);
+  if (await shell.$('[data-onboarding]')) { await shell.click('[data-action="onboard-skip"]'); await shell.waitForFunction(() => !document.querySelector('[data-onboarding]')); }
+  const invoke = (channel, payload = {}) => shell.evaluate(({ channel, payload }) => window.arco.invoke('arco:invoke', { channel, payload }), { channel, payload });
+  const first = await invoke('install-extension-store', { input: storeID });
+  assert.equal(first.version, '1.0.0');
+  latest = '2.0.0'; payload = pack('2.0.0');
+  const updates = await invoke('check-extension-updates');
+  assert.ok(updates.some(item => item.to === '2.0.0'), JSON.stringify(updates));
+  const list = await invoke('extension-list');
+  assert.equal(list.find(item => item.id === storeID)?.version, '2.0.0');
+  latest = '3.0.0'; payload = pack('3.0.0', { permissions: ['notifications'] });
+  const skipped = await invoke('check-extension-updates');
+  assert.ok(skipped.some(item => item.skipped), JSON.stringify(skipped));
+  const after = await invoke('extension-list');
+  assert.equal(after.find(item => item.id === storeID)?.version, '2.0.0');
+});

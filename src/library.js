@@ -31,6 +31,9 @@ class Library {
     if (typeof this.settings.onboarded !== 'boolean') this.settings.onboarded = fresh;
     if (!/^[\w-]{1,128}$/.test(this.settings.deviceID || '')) this.settings.deviceID = core.id();
     this.settings.sidebarWidth = Math.max(216, Math.min(400, Number(this.settings.sidebarWidth) || 240));
+    this.settings.sitePermissions = core.sanitizeSitePermissions(this.settings.sitePermissions);
+    this.settings.contentSettings = core.sanitizeContentSettings(this.settings.contentSettings);
+    this.settings.zoomByOrigin = core.sanitizeZoomByOrigin(this.settings.zoomByOrigin);
     this.data.settings = this.settings;
     this.syncing = false;
   }
@@ -320,10 +323,10 @@ class Library {
     } finally { this.installingExtensions = false; }
   }
   async loadExtensions() {
-    for (const extension of this.settings.extensions || []) {
-      if (extension.enabled === false) continue;
+    // 扩展之间互不依赖：并行加载，避免扩展越多冷启动越慢。
+    await Promise.allSettled((this.settings.extensions || []).filter(extension => extension.enabled !== false).map(async extension => {
       try { if (fs.existsSync(path.join(extension.path, 'manifest.json'))) await session.fromPartition('persist:arco').extensions.loadExtension(extension.path, { allowFileAccess: false }); } catch (error) { this.settings.syncStatus = `扩展 ${path.basename(extension.path)} 加载失败：${error.message}`; }
-    }
+    }));
   }
   async addExtension(approve = async () => true, selectedFolder = '') {
     if (this.installingExtensions) throw new Error('扩展正在安装，请稍候');
@@ -399,6 +402,32 @@ class Library {
       catch { this.warning = '旧扩展备份清理失败，已保留备份目录；新版本已生效'; }
     }
     return result;
+  }
+  async checkExtensionUpdates() {
+    if (this.installingExtensions) return [];
+    this.installingExtensions = true;
+    const results = [], ses = session.fromPartition('persist:arco');
+    try {
+      for (const record of this.settings.extensions || []) {
+        if (record.enabled === false || !crx.ID.test(record.storeID || '')) continue;
+        let latest;
+        try { latest = await crx.checkUpdate(record.storeID); }
+        catch (error) { results.push({ id: record.id, name: record.storeID, error: error.message }); continue; }
+        if (!latest) continue;
+        let previous = {};
+        try { previous = JSON.parse(fs.readFileSync(path.join(record.path, 'manifest.json'), 'utf8')); } catch {}
+        const current = ses.extensions.getExtension(record.id)?.version || previous.version || '';
+        if (!current || crx.compareVersions(latest, current) <= 0) continue;
+        // 自动更新不替用户接受更多权限：新版本权限超出旧版本时跳过，留给用户手动安装并确认。
+        const allowed = new Set([...(previous.permissions || []), ...(previous.host_permissions || [])]);
+        try {
+          const result = await this.installPackage(record.storeID, async staging => ({ ...await crx.install(record.storeID, staging), id: record.storeID }), async asked => asked.permissions.every(permission => allowed.has(permission)));
+          if (result?.cancelled) results.push({ id: record.id, name: previous.name || record.storeID, skipped: '新版本需要更多权限，已跳过自动更新' });
+          else results.push({ id: record.id, name: result.name, from: current, to: result.version });
+        } catch (error) { results.push({ id: record.id, name: previous.name || record.storeID, error: error.message }); }
+      }
+    } finally { this.installingExtensions = false; }
+    return results;
   }
   async installFromStore(input, approve = async () => true) {
     if (this.installingExtensions) throw new Error('扩展正在安装，请稍候');

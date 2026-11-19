@@ -83,3 +83,33 @@ test('MemoryVault refuses wrong-origin autofill and preserves exact origins', as
   await assert.rejects(() => vault.fill(credential.id, 'http://127.0.0.1:3211/login'), /来源不匹配/);
   await assert.rejects(() => vault.save({ origin: 'http://example.com', username: 'alice', password: 'secret' }), /HTTP/);
 });
+
+test('site permission memory keeps only known origins and permissions', () => {
+  const sanitized = core.sanitizeSitePermissions({
+    'https://example.com': { notifications: 'allow', media: 'deny', 'bad-permission': 'allow' },
+    'http://localhost:8080': { geolocation: 'allow' },
+    'file:///etc/passwd': { notifications: 'allow' },
+    'javascript:alert(1)': { notifications: 'allow' },
+    'https://bad.example': { notifications: 'maybe' },
+    'https://not-an-object.example': 'allow'
+  });
+  assert.deepEqual(sanitized, { 'https://example.com': { notifications: 'allow', media: 'deny' }, 'http://localhost:8080': { geolocation: 'allow' } });
+  assert.deepEqual(core.sanitizeSitePermissions(null), {});
+  assert.deepEqual(core.sanitizeSitePermissions([]), {});
+});
+
+test('content settings and per-site zoom keep only valid http(s) origins and values', () => {
+  assert.deepEqual(core.sanitizeContentSettings({
+    'https://a.example': { javascript: false, images: true },
+    'http://b.example': { images: false, other: false },
+    'file:///tmp/x': { images: false },
+    'https://c.example': { images: true }
+  }), { 'http://b.example': { images: false } });
+  assert.deepEqual(core.sanitizeZoomByOrigin({
+    'https://a.example': 1.5,
+    'https://b.example': 1,
+    'https://c.example': 99,
+    'https://d.example': 0.5,
+    'file:///tmp/x': 2
+  }), { 'https://a.example': 1.5, 'https://d.example': 0.5 });
+});

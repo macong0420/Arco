@@ -34,12 +34,15 @@ open dist/mac-arm64/Arco.app
 - User-Agent 使用标准 Chrome 形态（`Chrome/主版本.0.0.0 Safari/537.36`，不含 `Electron/` 标记）；按 UA 判断浏览器版本的第三方登录页不会再把 Arco 当成过旧内核。
 - macOS 触控板手势：双指右滑后退、左滑前进，原生捏合缩放网页（1～5 倍）；覆盖普通/无痕标签、分屏、Peek、阅读视图和网站弹窗。分屏操作作用于接收手势的窗格，阅读视图右滑返回原网页；设置中的“还原缩放”同时还原视觉缩放和排版缩放。
 - 真实双网页分屏、分屏比例调整；点哪一侧，查找/缩放/打印/截图/刷新就作用于哪一侧，关闭聚焦的次级窗格时由另一窗格接管。Shift 点击链接 Peek、全部标签页视图、页内查找（匹配数量、`⌘G`/`⇧⌘G`）、历史、下载；带窗口尺寸的 `window.open` 创建独立窗口；无尺寸、先开空白页再跳转以及 iframe 发起的新标签页通过 Electron `createWindow` 接管原生子 WebContents，保留 `window.opener`、回传消息与自行关闭的能力。
-- 下载默认保存到系统“下载”目录（开发/测试构建落在自己的数据目录内），不弹出阻塞式保存面板；同名文件追加序号而不覆盖，支持暂停与恢复。普通窗口的下载记录写入 `Downloads.json`，无痕窗口的下载只留在内存。当前不做跨重启续传、每次询问保存位置或 Dock 进度。
+- 下载默认保存到系统“下载”目录（开发/测试构建落在自己的数据目录内），不弹出阻塞式保存面板；可在设置中改为每次询问保存位置、下载完成后自动打开。同名文件追加序号而不覆盖，支持暂停与恢复、已完成文件另存为，Dock 图标显示总进度。普通窗口的下载记录写入 `Downloads.json`，无痕窗口的下载只留在内存。当前不做跨重启续传。
+- 后台标签休眠：默认闲置 1 小时后释放后台标签的渲染进程，切回时重新加载；可在设置中改为 30 分钟 / 2 小时 / 4 小时或关闭。有声、固定、当前可见和正在认证/查找的标签不会休眠。
+- 网站权限：相机/麦克风、位置、通知、剪贴板的允许或拒绝会记住，可在设置 → 隐私与安全中清除；无痕会话只在本次运行内有效。
+- 站点级内容设置与缩放：可对当前网站关闭图片；每个网站的缩放比例会被记住，使用“还原缩放”后清除。设置 → 隐私与安全还提供清除当前网站或所有网站的数据。
 - 密码保存确认、精确来源的显式填充、强密码生成、CSV 导入/导出；显示、复制和填充通过系统认证解锁。
 - 书签导入：直接读取本机 Chrome、Edge、Brave、Vivaldi、Opera、Dia、Firefox、Safari、Arc 的书签文件（Chrome 开启账号书签同步时读 `AccountBookmarks`；Safari 与 Chromium 系数据需授予完全磁盘访问权限），也可导入 HTML、Chromium Bookmarks JSON、Arc StorableSidebar JSON 文件；HTML 导出保留空间与文件夹路径。
 - 阅读视图（Mozilla Readability）是独立的文章视图：脚本、表单和框架被 CSP 与内容清洗禁止，页内查找、打印、保存 PDF 和截图都作用于文章本身，退出后回到原网页；提取失败时保持网页状态。另有网页可视区域截图、Chromium 自带 PDF 查看和开发者工具。
 - 每个无痕窗口使用独立内存会话；不写浏览历史、标签会话或密码，也不复用后来新开的无痕窗口的 Cookie。
-- 扩展：从 Chrome 应用商店按链接或扩展 ID 安装（走 Google 官方更新接口下载 crx，先在本机用 Node `crypto` 校验 CRX3/CRX2 签名、期望 ID、公钥 SHA-256 摘要与 zip 字节绑定，并确认 manifest 声明的公钥不会让 Electron 以另一个身份加载，然后才解包加载；任一校验失败都不写入安装目录）。同 ID 重装已停用扩展是事务性的：坏包、取消或加载失败都保留旧包、旧记录与停用状态。商店详情页自带的“添加至 Chrome”由 Arco 接管：点击后按 Chrome 的方式弹出权限确认，确认后下载、校验并安装，地址栏右侧也有安装按钮；工具栏的扩展入口显示图标、版本与启用状态，可停用、启用或移除（停用只卸载，文件仍在）；通过兼容层支持工具栏图标、`chrome.action`/`onClicked`、`chrome.sidePanel` 侧栏、`chrome.debugger`（仅普通 HTTP(S) 标签，不含无痕窗口）、`chrome.tabs`、`chrome.windows`、右键菜单等。点图标即按扩展自己的逻辑执行——声明了 `default_popup` 的弹出它自己的界面，没声明的触发它的 `onClicked`（例如 JSON-handle 会自己 `chrome.windows.create` 开窗口）。声明了 `side_panel` 并开启 `openPanelOnActionClick` 的在右侧打开扩展自己的侧栏，此时扩展面板自动退出（侧栏是原生视图，面板不退出会盖住它）；只处理 `onClicked` 的扩展在点击后若自己改了标题或角标，会以一条提示显示新状态，点击失败也会提示原因而不是毫无反应。仍可安装本地 `.crx` 或解压扩展。首次引导和设置 → 扩展可按 Chrome 个人资料选择迁移：复制扩展文件到 Arco、实际加载并保存，保留启用或停用状态；逐项报告失败，已有扩展跳过。不会迁移扩展内部设置、API Key 或账号，也不持续跟随 Chrome 更新。
+- 扩展：从 Chrome 应用商店按链接或扩展 ID 安装（走 Google 官方更新接口下载 crx，先在本机用 Node `crypto` 校验 CRX3/CRX2 签名、期望 ID、公钥 SHA-256 摘要与 zip 字节绑定，并确认 manifest 声明的公钥不会让 Electron 以另一个身份加载，然后才解包加载；任一校验失败都不写入安装目录）。同 ID 重装已停用扩展是事务性的：坏包、取消或加载失败都保留旧包、旧记录与停用状态。商店详情页自带的“添加至 Chrome”由 Arco 接管：点击后按 Chrome 的方式弹出权限确认，确认后下载、校验并安装，地址栏右侧也有安装按钮；工具栏的扩展入口显示图标、版本与启用状态，可停用、启用或移除（停用只卸载，文件仍在）；通过兼容层支持工具栏图标、`chrome.action`/`onClicked`、`chrome.sidePanel` 侧栏、`chrome.debugger`（仅普通 HTTP(S) 标签，不含无痕窗口）、`chrome.tabs`、`chrome.windows`、右键菜单等。点图标即按扩展自己的逻辑执行——声明了 `default_popup` 的弹出它自己的界面，没声明的触发它的 `onClicked`（例如 JSON-handle 会自己 `chrome.windows.create` 开窗口）。声明了 `side_panel` 并开启 `openPanelOnActionClick` 的在右侧打开扩展自己的侧栏，此时扩展面板自动退出（侧栏是原生视图，面板不退出会盖住它）；只处理 `onClicked` 的扩展在点击后若自己改了标题或角标，会以一条提示显示新状态，点击失败也会提示原因而不是毫无反应。仍可安装本地 `.crx` 或解压扩展；Electron 45 仍能加载 MV2 扩展，但依赖已移除 Chrome API 的功能可能残缺。首次引导和设置 → 扩展可按 Chrome 个人资料选择迁移：复制扩展文件到 Arco、实际加载并保存，保留启用或停用状态；逐项报告失败，已有扩展跳过。不会迁移扩展内部设置、API Key 或账号，也不持续跟随 Chrome 更新。
 
 常驻区始终显示“＋ 添加”，可填写名称和网址，也可把标签或固定书签拖到常驻区。常驻磁贴使用实际网站图标，点按会优先切换到当前空间里已打开的同一网页。悬停或键盘聚焦磁贴后，可以使用移除按钮。
 
@@ -109,7 +112,7 @@ open dist/mac-arm64/Arco.app
 
 2026-11-12 复审：修改前的完整基线为 47 项单元测试和 32 项端到端检查通过。本轮修正后，52 项不需要网络监听的检查通过，包含设置/扩展事务的真实文件故障注入、同步写盘失败、通行密钥桥的参数与取消契约。同网址标签独立显示/关闭/重启的新增 Electron 回归也在环境切换前通过。
 
-当前受限执行环境拒绝 Electron 启动和本机端口监听（`EPERM`），因此 5 项依赖本地 HTTP 服务的 CRX 测试及修改后的完整 E2E 尚未复跑。已添加 CDP 虚拟认证器的注册/登录回归，待在正常本机环境执行 `npm test` 和 `npm run test:e2e`；虚拟认证器通过也不等于 Apple「密码」或 X 实际登录通过。完整差异、方案和验证边界见 [复审记录](docs/ZIGZAG_PARITY_AUDIT_2026-11-11.md#2026-11-12-复审与修正)。
+已在本机执行 `npm test` 和 `npm run test:e2e`，覆盖 CRX 签名与安装事务、真实 Electron 中的商店安装/扩展更新、网站权限记忆、后台标签休眠、手势、密码与迁移；真实钥匙串授权、DRM、通行密钥和各网站登录状态仍需实机验收。完整差异、方案和验证边界见 [复审记录](docs/ZIGZAG_PARITY_AUDIT_2026-11-11.md#2026-11-12-复审与修正)。
 
 这是开发预览版，最终独立安全复审尚未完成。本机加密密码库及重启读取已有验证；重新签名后的钥匙串访问需要使用者本人授权，Touch ID 的实际批准流程和两台 Mac 之间的 iCloud 文件传输仍需人工验收。
 
@@ -121,7 +124,7 @@ open dist/mac-arm64/Arco.app
 | 浏览内核 | Chromium；体积、内存和更新责任与原版 WebKit 不同 |
 | 书签同步 | 新增加密之外的明文书签文件夹同步；原版没有书签/Spaces 跨设备同步 |
 | 密码同步 | 加密文件夹同步；当前本地构建没有原生 iCloud Keychain 同步权限 |
-| 扩展 | 可从商店按链接/ID 安装（点商店页面的“添加至 Chrome”会走 Arco 的下载、校验与权限确认，地址栏也有安装入口），也可选择本地 `.crx` 或解压目录（本地扩展由你选择来源）；安装前显示扩展请求的权限；通过兼容层支持工具栏图标、`chrome.action`、`chrome.sidePanel`、受限 `chrome.debugger`、`chrome.tabs`、`chrome.windows`、右键菜单等；安装前校验 crx 签名与扩展 ID，并把已认证的开发者公钥固定进 manifest，加载后确认实际扩展 ID 等于请求 ID，否则回滚；`chrome.runtime.connectNative`/`sendNativeMessage` 被拒绝（不启动本机原生应用）；`chrome.permissions.request` 一律拒绝；无 Chrome 账号同步、无扩展自动更新、无通用 1Password 桌面原生桥接 |
+| 扩展 | 可从商店按链接/ID 安装（点商店页面的“添加至 Chrome”会走 Arco 的下载、校验与权限确认，地址栏也有安装入口），也可选择本地 `.crx` 或解压目录（本地扩展由你选择来源）；安装前显示扩展请求的权限；通过兼容层支持工具栏图标、`chrome.action`、`chrome.sidePanel`、受限 `chrome.debugger`、`chrome.tabs`、`chrome.windows`、右键菜单等；安装前校验 crx 签名与扩展 ID，并把已认证的开发者公钥固定进 manifest，加载后确认实际扩展 ID 等于请求 ID，否则回滚；`chrome.runtime.connectNative`/`sendNativeMessage` 被拒绝（不启动本机原生应用）；`chrome.permissions.request` 一律拒绝；启动后和每 6 小时按商店更新接口检查扩展更新，新版本要求更多权限时跳过自动更新并提示；无 Chrome 账号同步、无通用 1Password 桌面原生桥接 |
 | 拦截规则 | 仅内置 16 个常见跟踪服务域名后缀，非主文档请求；不是原版约 13 万条 EasyList 内容规则 |
 | Arc 导入 | 读取经典容器及 sidebarSyncState/firebaseSyncState 中的空间、固定页、文件夹、收藏和颜色；不导入登录 Cookie 或 SQLite 历史 |
 | 其他浏览器导入 | 书签支持 Chrome、Edge、Brave、Vivaldi、Opera、Dia、Firefox、Safari、Arc；Chrome 等 Chromium 系支持用户授权后的本机密码与 Cookie 迁移（macOS v10 加密），已有记录跳过；Safari / Apple「密码」通过 CSV 导入密码，Safari Cookie、通行密钥、浏览历史和持续同步未实现。Chrome 扩展仍可单独迁移 |
